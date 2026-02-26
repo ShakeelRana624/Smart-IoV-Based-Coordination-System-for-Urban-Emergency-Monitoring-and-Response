@@ -892,28 +892,17 @@ class IntegratedGunDetectionSystem:
         return person_id, activity, person_state
     
     def create_vertical_analytics_panel(self, frame: np.ndarray, detections: List[Dict[str, Any]] = None) -> np.ndarray:
-        """Create vertical analytics panel for right side"""
+        """Create professional analytics panel for right side"""
         analytics = np.zeros((540, 240, 3), dtype=np.uint8)
         analytics.fill(20)  # Dark background
         
-        # Add title
-        cv2.putText(analytics, "SYSTEM ANALYTICS", (50, 25), 
+        # Add professional title
+        cv2.putText(analytics, "THREAT ANALYTICS", (50, 25), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         
         # Get current system state using enhanced logic
         current_state = getattr(self.decision_engine.state_agent, 'state_transition', None)
         system_state = self.get_enhanced_system_state(detections) if detections else "NORMAL"
-        
-        # Analytics data
-        hands_up_count = self.pose_detector.get_hands_up_count()
-        hands_up_ids = self.pose_detector.get_hands_up_person_ids()
-        
-        # Fight detection (temporarily disabled)
-        fight_count = 0
-        fighting_ids = []
-        
-        # Get activity statistics from human tracker
-        activity_stats = self.get_activity_statistics(detections)
         
         # Get current and total people count
         self.current_detections = detections  # Store current detections
@@ -927,51 +916,33 @@ class IntegratedGunDetectionSystem:
                             all_person_ids.add(detection.get("id", 0))
         total_unique_people = len(all_person_ids)
         
+        # Professional analytics data (simplified)
         analytics_data = [
             ("System State:", system_state.upper(), self.get_system_state_color(system_state.upper())),
             ("", "", (255, 255, 255)),
-            ("📊 Statistics", "", (0, 255, 0)),
-            ("Total:", str(self.stats['total_detections']), (255, 255, 255)),
-            ("Threat:", str(self.stats['threat_detections']), (255, 165, 0)),
-            ("Current People:", str(current_people), (0, 255, 0)),  # Added current people count
-            ("Total Unique:", str(total_unique_people), (0, 255, 255)),  # Added total unique people
-            ("Hands-Up:", str(hands_up_count), (0, 255, 255)),
-            ("Fights:", str(fight_count), (0, 0, 255)),  # Added fight count
-            ("Threat Rate:", f"{(self.stats['threat_detections']/max(1,self.stats['total_detections'])*100):.1f}%", (255, 165, 0)),
-            ("Evidence:", str(len([f for f in os.listdir("evidence/videos") if f.endswith(".mp4")])), (0, 255, 255)),
+            ("� People Tracking", "", (0, 255, 0)),
+            ("Current:", str(current_people), (0, 255, 255)),
+            ("Total Unique:", str(total_unique_people), (0, 255, 255)),
             ("", "", (255, 255, 255)),
-            ("🙋 Pose Status", "", (0, 255, 255)),
-            (f"Active IDs:", str(hands_up_ids) if hands_up_ids else "None", (0, 255, 255)),
+            ("🔍 Threat Status", "", (255, 165, 0)),
+            ("Total Detections:", str(self.stats['total_detections']), (255, 255, 255)),
+            ("Threat Detections:", str(self.stats['threat_detections']), (255, 165, 0)),
+            ("Alerts Triggered:", str(self.stats['alerts_triggered']), (255, 0, 0)),
             ("", "", (255, 255, 255)),
-            ("🥊 Fight Status", "", (0, 0, 255)),  # Added fight status section
-            (f"Fighting IDs:", str(fighting_ids) if fighting_ids else "None", (0, 0, 255)),
-            ("", "", (255, 255, 255)),
-            ("🤸 Activity Status", "", (255, 165, 0)),  # Added activity status section
-            (f"Sitting:", str(activity_stats.get("Sitting", 0)), (255, 165, 0)),
-            (f"Standing:", str(activity_stats.get("Standing", 0)), (0, 255, 0)),
-            (f"Walking:", str(activity_stats.get("Walking", 0)), (0, 255, 255)),
-            (f"Running:", str(activity_stats.get("Running", 0)), (255, 0, 0)),
-            (f"HandsUp:", str(activity_stats.get("HandsUp", 0)), (255, 255, 0)),
-            (f"Aiming:", str(activity_stats.get("Aiming", 0)), (0, 0, 255)),
-            ("", "", (255, 255, 255)),
-            ("⚡ Performance", "", (0, 255, 0)),
+            ("⚡ System Status", "", (0, 255, 0)),
             ("FPS:", "30.0", (0, 255, 0)),
             ("CPU:", "45%", (255, 255, 0)),
             ("Memory:", "512MB", (255, 165, 0)),
             ("", "", (255, 255, 255)),
-            ("⏱️ Timeline", "", (0, 255, 255)),
+            ("📊 Session Info", "", (0, 255, 255)),
             ("Uptime:", "02:15:30", (0, 255, 255)),
-            ("Last Alert:", "None", (255, 255, 255)),
-            ("", "", (255, 255, 255)),
-            ("🔥 Activity", "", (255, 165, 0)),
-            ("Last Hour:", str(len([d for d in getattr(self, 'detection_history', [])[-50:]])), (255, 165, 0)),
-            ("Peak:", "12/min", (255, 0, 0)),
+            ("Evidence:", str(len([f for f in os.listdir("evidence/videos") if f.endswith(".mp4")])), (0, 255, 255)),
         ]
         
         y_offset = 50
         for label, value, color in analytics_data:
             if label:
-                if label.startswith(("📊", "⚡", "⏱️", "🔥")):
+                if label.startswith(("�", "🔍", "⚡", "�")):
                     # Category headers
                     cv2.putText(analytics, label, (10, y_offset), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
@@ -983,44 +954,9 @@ class IntegratedGunDetectionSystem:
                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
             y_offset += 18
         
-        # Add weapon details section
-        cv2.putText(analytics, "WEAPONS DETECTED", (10, y_offset), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-        y_offset += 20
-        
-        if detections is None:
-            detections = []
-        
-        if detections:
-            for i, detection in enumerate(detections[:5]):  # Show max 5 weapons
-                weapon_type = detection.get("meta", {}).get("weapon_type", "Unknown").upper()
-                weapon_class = detection.get("meta", {}).get("class_name", "Unknown").upper()
-                weapon_id = detection.get("id", i+1)
-                confidence = detection.get("meta", {}).get("raw_confidence", 0) * 100
-                
-                # Enhanced color coding - Red for all weapons
-                if weapon_class == "GUN" or "FIREARM" in weapon_type:
-                    color = (0, 0, 255)  # Red for guns
-                    icon = "🔫"
-                elif weapon_class == "KNIFE" or "BLADE" in weapon_type:
-                    color = (0, 0, 255)  # Red for knives too
-                    icon = "🔪"
-                else:
-                    color = (0, 0, 255)  # Red for all weapons
-                    icon = "⚠️"
-                
-                # Display with weapon type and icon
-                cv2.putText(analytics, f"{icon} ID:{weapon_id} {weapon_class}", (10, y_offset), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
-                cv2.putText(analytics, f"{weapon_type}", (10, y_offset + 12), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.25, color, 1)
-                cv2.putText(analytics, f"{confidence:.1f}%", (150, y_offset), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
-                y_offset += 25
-        else:
-            cv2.putText(analytics, "No weapons detected", (10, y_offset), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 100, 100), 1)
-            y_offset += 15
+        # Add professional footer
+        cv2.putText(analytics, "AI-POWERED SECURITY", (50, 520), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 100, 100), 1)
         
         return analytics
     
@@ -1200,7 +1136,7 @@ class IntegratedGunDetectionSystem:
         cv2.rectangle(full_screen, (800, 240), (1040, 420), (0, 255, 0), 2)
         cv2.rectangle(full_screen, (1040, 60), (1280, 600), (0, 255, 0), 2)
         
-        # Add section labels
+        # Add section labels (single display)
         cv2.putText(full_screen, "LIVE FEED", (10, 85), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.putText(full_screen, "BIRD'S EYE", (810, 85), 
