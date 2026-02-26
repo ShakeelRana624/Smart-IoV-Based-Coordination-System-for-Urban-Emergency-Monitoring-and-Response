@@ -1059,12 +1059,8 @@ class IntegratedGunDetectionSystem:
             time_since_update = detection.get("meta", {}).get("time_since_update", 0)
             keypoints = detection.get("meta", {}).get("keypoints", [])
             
-            # Enhanced label with State, ID, and Pose
-            label_lines = [
-                f"ID: {person_id}",
-                f"State: {person_state}",
-                f"Pose: {activity}"
-            ]
+            # Enhanced horizontal label with State, ID, and Pose
+            label_text = f"ID: {person_id} | State: {person_state} | Pose: {activity}"
             
             # Draw bounding box with occlusion handling
             if is_occluded:
@@ -1097,19 +1093,16 @@ class IntegratedGunDetectionSystem:
                 # Normal label with state info
                 label_color = color
             
-            # Draw multi-line label background and text
-            label_height = 25
-            total_label_height = len(label_lines) * label_height + 5
+            # Draw single-line label background and text
+            label_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
             
-            # Draw background for multi-line label
-            cv2.rectangle(annotated_frame, (x1, y1 - total_label_height), 
-                         (x1 + 150, y1), label_color, -1)
+            # Draw background for single-line label
+            cv2.rectangle(annotated_frame, (x1, y1 - label_size[1] - 10), 
+                         (x1 + label_size[0] + 10, y1), label_color, -1)
             
-            # Draw each line of the label
-            for i, line in enumerate(label_lines):
-                line_y = y1 - total_label_height + (i + 1) * label_height - 5
-                cv2.putText(annotated_frame, line, (x1 + 5, line_y), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            # Draw label text in white
+            cv2.putText(annotated_frame, label_text, (x1 + 5, y1 - 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
             
             # Draw pose landmarks if available
             if len(keypoints) >= 17:
