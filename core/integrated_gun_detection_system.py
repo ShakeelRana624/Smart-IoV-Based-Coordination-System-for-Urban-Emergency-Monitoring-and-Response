@@ -1116,7 +1116,8 @@ class IntegratedGunDetectionSystem:
                 # Import pose drawing functions from human_tracker
                 from detection.human_tracker import draw_pose_landmarks, draw_activity_info
                 annotated_frame = draw_pose_landmarks(annotated_frame, keypoints, color, 2)
-                annotated_frame = draw_activity_info(annotated_frame, person_id, activity, keypoints, (x1, y1, x2, y2))
+                # Comment out draw_activity_info to avoid duplicate labels
+                # annotated_frame = draw_activity_info(annotated_frame, person_id, activity, keypoints, (x1, y1, x2, y2))
             
             # Draw center point
             center_x = (x1 + x2) // 2
