@@ -756,7 +756,7 @@ class EvidenceAgent:
         self.is_recording = False
         self.weapon_detected = False
         self.normal_state_counter = 0
-        self.normal_state_threshold = 5  # Frames of normal state to stop recording (reduced)
+        self.normal_state_threshold = 100  # ENHANCED: 100 frames (3.3 seconds) after weapon disappears
         self.recording_completed = False  # Track if recording is completed for this session
     
     def add_frame_to_buffer(self, frame: np.ndarray, timestamp: float = None):
