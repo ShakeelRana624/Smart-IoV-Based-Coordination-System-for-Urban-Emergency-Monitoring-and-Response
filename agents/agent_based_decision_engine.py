@@ -825,14 +825,35 @@ class EvidenceAgent:
         return state
     
     def _is_weapon_detected(self, detection: Dict[str, Any]) -> bool:
-        """Check if any weapon is detected with sufficient confidence"""
+        """Check if any weapon is detected with sufficient confidence OR aiming pose detected"""
         gun_conf = detection.get("gun_conf", 0)
         knife_conf = detection.get("knife_conf", 0)
         explosion_conf = detection.get("explosion_conf", 0)  # If available
         grenade_conf = detection.get("grenade_conf", 0)  # If available
         
-        # Weapon detected if any weapon confidence > 0.4
-        return max(gun_conf, knife_conf, explosion_conf, grenade_conf) > 0.4
+        # Check for aiming pose activity
+        activity = detection.get("meta", {}).get("activity", "Unknown")
+        is_aiming = activity.lower() == "aiming"
+        
+        # Enhanced weapon detection: Weapon OR (Weapon + Aiming)
+        weapon_detected = max(gun_conf, knife_conf, explosion_conf, grenade_conf) > 0.4
+        
+        # ENHANCEMENT: Save evidence if:
+        # 1. Weapon detected (any confidence > 0.4)
+        # 2. OR Weapon detected + Aiming pose (even low confidence weapon)
+        weapon_plus_aiming = weapon_detected and is_aiming
+        
+        if weapon_plus_aiming:
+            print(f"🎯 Enhanced Evidence: Weapon + Aiming detected! Weapon: {max(gun_conf, knife_conf, explosion_conf, grenade_conf):.2f}, Pose: {activity}")
+            return True
+        elif weapon_detected:
+            print(f"🔫 Evidence: Weapon detected! Confidence: {max(gun_conf, knife_conf, explosion_conf, grenade_conf):.2f}")
+            return True
+        elif is_aiming:
+            print(f"👁️ Evidence: Aiming pose detected! (No weapon)")
+            return False  # Only aiming without weapon - don't save evidence
+        
+        return False
     
     def _start_recording(self, detection: Dict[str, Any]):
         """Start video recording with buffered frames"""
