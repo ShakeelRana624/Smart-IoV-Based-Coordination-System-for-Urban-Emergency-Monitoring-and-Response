@@ -17,8 +17,11 @@ from typing import Dict, List, Any, Optional, Tuple
 from ultralytics import YOLO
 from detection.human_tracker import HumanTracker
 from pose_detection import PoseDetector
-# from fight_detection import FightDetector  # Temporarily commented due to TensorFlow dependency issues
+from fight_detection.fight_detector import ViolenceDetector
 from agents.agent_based_decision_engine import AgentBasedDecisionEngine, AgentState
+from explosion.fire_smoke_detection import FireSmokeDetector
+from utils.alert_system import AlertSystem
+from utils.firebase_alert_storage import FirebaseAlertStorage
 
 class IntegratedGunDetectionSystem:
     """Complete integrated system with YOLO detection and agent-based decision making"""
@@ -40,10 +43,21 @@ class IntegratedGunDetectionSystem:
         self.pose_detector = PoseDetector()
         print("✓ Pose detector initialized")
         
-        # Initialize fight detector (temporarily disabled)
-        # self.fight_detector = FightDetector()
-        # print("✓ Fight detector initialized")
-        self.fight_detector = None  # Temporarily disabled
+        # Initialize violence detector
+        self.violence_detector = ViolenceDetector()
+        print("✓ Violence detector initialized")
+        
+        # Initialize fire-smoke detector
+        self.fire_smoke_detector = FireSmokeDetector()
+        print("✓ Fire-Smoke detector initialized")
+        
+        # Initialize alert system
+        self.alert_system = AlertSystem(camera_id="CAM_001", camera_location="Main Security Camera")
+        print("✓ Alert system initialized")
+        
+        # Initialize Firebase alert storage
+        self.firebase_storage = FirebaseAlertStorage()
+        print("✓ Firebase alert storage initialized")
         
         # Get reference to evidence agent for direct frame buffering
         self.evidence_agent = self.decision_engine.evidence_agent
@@ -73,7 +87,7 @@ class IntegratedGunDetectionSystem:
             "alerts_triggered": 0,
             "evidence_saved": 0,
             "hands_up_detections": 0,
-            "fight_detections": 0,
+            "violence_detections": 0,
             "activity_detections": {}  # Track activity statistics
         }
     
@@ -136,12 +150,17 @@ class IntegratedGunDetectionSystem:
             # Frame is already 3-channel, ensure it's BGR
             pass
         
-        # Detect weapons
-        results = self.model(frame, stream=True, conf=0.5)
+        # Detect weapons with lower confidence threshold
+        results = self.model(frame, stream=True, conf=0.3)
         weapon_detections = []
         
-        for r in results:
+        # Convert generator to list for debugging
+        results_list = list(results)
+        print(f"🔍 YOLO Results: {len(results_list)} result(s)")
+        
+        for r in results_list:
             boxes = r.boxes
+            print(f"📦 Boxes in result: {len(boxes)}")
             for box in boxes:
                 detection = self.convert_yolo_to_detection(box, frame)
                 if detection:
@@ -150,10 +169,17 @@ class IntegratedGunDetectionSystem:
         # Detect humans
         human_detections = self.human_tracker.detect_humans(frame)
         
+        # Detect fire and smoke
+        fire_smoke_result = self.fire_smoke_detector.detect_fire_smoke_in_frame(frame)
+        
         # Combine detections
         all_detections = weapon_detections + human_detections
         
-        return all_detections
+        # Add fire-smoke detection info to frame metadata
+        if fire_smoke_result["fire_detected"] or fire_smoke_result["smoke_detected"]:
+            print(f"🔥 EMERGENCY: Fire ({fire_smoke_result['fire_count']}) or Smoke ({fire_smoke_result['smoke_count']}) detected!")
+            
+        return all_detections, fire_smoke_result
     
     def convert_yolo_to_detection(self, box, frame: np.ndarray) -> Optional[Dict[str, Any]]:
         """Convert YOLO detection to agent format"""
@@ -169,15 +195,28 @@ class IntegratedGunDetectionSystem:
             original_class = self.model.names[cls].upper()
             
             # Enhanced weapon classification
-            if "GUN" in original_class or "PISTOL" in original_class or "RIFLE" in original_class or "WEAPON" in original_class:
+            if original_class == "GUN":
                 class_name = "GUN"
                 weapon_type = "Firearm"
-            elif "KNIFE" in original_class or "BLADE" in original_class or "SHARP" in original_class:
+            elif original_class == "KNIFE":
                 class_name = "KNIFE"
                 weapon_type = "Blade Weapon"
+            elif original_class == "EXPLOSION":
+                class_name = "EXPLOSION"
+                weapon_type = "Explosive Threat"
+            elif original_class == "GRENADE":
+                class_name = "GRENADE"
+                weapon_type = "Explosive Device"
             else:
                 class_name = original_class
-                weapon_type = "Unknown Weapon"
+                weapon_type = "Unknown Object"
+            
+            # Debug print for all detections
+            print(f"🔍 DETECTION: {original_class} with confidence {conf:.2f}")
+            
+            # Debug print for weapon detection
+            if class_name in ["GUN", "KNIFE", "EXPLOSION", "GRENADE"]:
+                print(f"🎯 WEAPON DETECTED: {class_name} with confidence {conf:.2f}")
             
             # Create or update track
             person_id = self.update_track(x1, y1, w, h, class_name, conf)
@@ -186,10 +225,13 @@ class IntegratedGunDetectionSystem:
             detection = {
                 "id": person_id,
                 "bbox": [x1, y1, w, h],
-                "person_conf": conf if class_name.lower() == "gun" else 0.0,
-                "gun_conf": conf if class_name.lower() == "gun" else 0.0,
-                "knife_conf": conf if class_name.lower() == "knife" else 0.0,
-                "fight_conf": 0.0,  # Would need separate model
+                "person_conf": conf if class_name == "GUN" else 0.0,
+                "gun_conf": conf if class_name == "GUN" else 0.0,
+                "knife_conf": conf if class_name == "KNIFE" else 0.0,
+                "explosion_conf": conf if class_name == "EXPLOSION" else 0.0,
+                "grenade_conf": conf if class_name == "GRENADE" else 0.0,
+                "violence_detected": False,  # Will be updated by violence detector
+                "violence_confidence": 0.0,  # Will be updated by violence detector
                 "meta": {
                     "class_name": class_name,
                     "weapon_type": weapon_type,
@@ -245,13 +287,28 @@ class IntegratedGunDetectionSystem:
         return best_match_id
     
     def clean_old_tracks(self):
-        """Remove tracks not seen recently"""
+        """Remove tracks not seen recently with occlusion handling"""
         current_frame = self.frame_count
         stale_ids = []
         
         for track_id, track_info in self.active_tracks.items():
-            if current_frame - track_info["last_seen"] > 30:
+            frames_since_last_seen = current_frame - track_info["last_seen"]
+            
+            # If person not seen for 3-6 frames, mark as potentially occluded
+            if 3 <= frames_since_last_seen <= 6:
+                # Keep track but mark as potentially occluded
+                track_info["occluded"] = True
+                track_info["occlusion_count"] = track_info.get("occlusion_count", 0) + 1
+                print(f"👁️ Person {track_id} potentially occluded for {frames_since_last_seen} frames")
+            
+            # If person not seen for more than 6 frames, remove track
+            elif frames_since_last_seen > 6:
                 stale_ids.append(track_id)
+                print(f"🗑️ Removing stale track {track_id} (not seen for {frames_since_last_seen} frames)")
+            else:
+                # Person is visible, reset occlusion flags
+                track_info["occluded"] = False
+                track_info["occlusion_count"] = 0
         
         for stale_id in stale_ids:
             del self.active_tracks[stale_id]
@@ -284,17 +341,33 @@ class IntegratedGunDetectionSystem:
                 hands_up_ids = self.pose_detector.get_hands_up_person_ids()
                 print(f"🙋 HANDS-UP DETECTED: {hands_up_count} persons with hands up (IDs: {hands_up_ids})")
             
-            # Detect fights
-            fight_results = self.fight_detector.detect_fights_in_frame(frame, person_detections)
+            # Detect violence
+            violence_results = self.violence_detector.detect_violence_in_frame(frame, person_detections)
             
-            # Update fight statistics
-            fight_count = self.fight_detector.get_fight_count()
-            if fight_count > self.stats.get("fight_detections", 0):
-                self.stats["fight_detections"] = fight_count
+            # Update violence statistics
+            violence_count = self.violence_detector.get_violence_count()
+            if violence_count > self.stats.get("violence_detections", 0):
+                self.stats["violence_detections"] = violence_count
                 
-                # Print fight detection info
-                fighting_ids = self.fight_detector.get_fighting_person_ids()
-                print(f"🥊 FIGHT DETECTED: {fight_count} persons fighting (IDs: {fighting_ids})")
+                # Print violence detection info
+                violent_ids = self.violence_detector.get_violent_person_ids()
+                print(f"🥊 VIOLENCE DETECTED: {violence_count} persons violent (IDs: {violent_ids})")
+                
+                # Trigger evidence recording when violence starts
+                for person_id in violent_ids:
+                    violence_info = self.violence_detector.get_violence_info(person_id)
+                    if violence_info and violence_info.get("violence_detected", False):
+                        # Save evidence for violence detection
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"violence_evidence_{person_id}_{timestamp}.jpg"
+                        filepath = f"{self.evidence_folder}/{filename}"
+                        
+                        # Draw annotations on frame including red bounding box
+                        annotated_frame = self.draw_violence_evidence(frame, violence_info)
+                        cv2.imwrite(filepath, annotated_frame)
+                        
+                        self.stats["evidence_saved"] += 1
+                        print(f"✓ Violence evidence saved: {filename}")
         
         for detection in detections:
             # Add pose information to detection if available
@@ -305,11 +378,11 @@ class IntegratedGunDetectionSystem:
                 detection["pose_confidence"] = pose_info.get("confidence", 0.0)
                 detection["pose_keypoints"] = pose_info.get("keypoints", [])
             
-            # Add fight information to detection if available (temporarily disabled)
-            if self.fight_detector is not None and person_id and person_id in self.fight_detector.detected_fights:
-                fight_info = self.fight_detector.detected_fights[person_id]
-                detection["fight_detected"] = fight_info.get("fight_detected", False)
-                detection["fight_confidence"] = fight_info.get("confidence", 0.0)
+            # Add violence information to detection if available
+            if person_id and person_id in self.violence_detector.detected_violence:
+                violence_info = self.violence_detector.detected_violence[person_id]
+                detection["violence_detected"] = violence_info.get("violence_detected", False)
+                detection["violence_confidence"] = violence_info.get("confidence", 0.0)
             
             # Process through agent engine
             result = self.decision_engine.process(detection)
@@ -415,24 +488,118 @@ class IntegratedGunDetectionSystem:
         except Exception as e:
             print(f"Database error: {e}")
     
+    def draw_violence_evidence(self, frame: np.ndarray, violence_info: Dict[str, Any]) -> np.ndarray:
+        """
+        Draw violence evidence on frame with red bounding box for evidence recording
+        
+        Args:
+            frame: Input frame
+            violence_info: Violence information dictionary
+            
+        Returns:
+            Frame with violence evidence drawn
+        """
+        try:
+            annotated = frame.copy()
+            person_id = violence_info.get("person_id")
+            violence_detected = violence_info.get("violence_detected", False)
+            confidence = violence_info.get("confidence", 0.0)
+            bbox = violence_info.get("bbox", [])
+            
+            if not bbox or len(bbox) < 4:
+                return annotated
+            
+            x, y, w, h = bbox[:4]
+            
+            if violence_detected:
+                # Draw thick red bounding box for violence evidence
+                cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 0, 255), 4)
+                
+                # Draw violence evidence label
+                evidence_label = f"VIOLENCE DETECTED - ID:{person_id}"
+                conf_text = f"Confidence: {confidence:.2f}"
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+                # Draw evidence label background
+                label_size = cv2.getTextSize(evidence_label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+                cv2.rectangle(annotated, (x, y - 80), (x + max(label_size[0] + 20, 400), y - 20), (0, 0, 255), -1)
+                cv2.rectangle(annotated, (x, y - 80), (x + max(label_size[0] + 20, 400), y - 20), (255, 255, 255), 2)
+                
+                # Draw evidence text
+                cv2.putText(annotated, evidence_label, (x + 10, y - 55), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                cv2.putText(annotated, conf_text, (x + 10, y - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(annotated, timestamp, (x + 10, y - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                
+                # Add warning indicators
+                cv2.putText(annotated, "⚠️ EVIDENCE RECORDING", (annotated.shape[1] // 2 - 150, 50), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+                
+                # Add system watermark
+                cv2.putText(annotated, "Intelligent Weapon Detection System", 
+                           (annotated.shape[1] - 350, annotated.shape[2] - 20), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+            return annotated
+            
+        except Exception as e:
+            print(f"Error drawing violence evidence: {e}")
+            return frame
+    
+    def draw_dashed_rectangle(self, frame: np.ndarray, pt1: Tuple[int, int], pt2: Tuple[int, int], color: Tuple[int, int, int], thickness: int = 2, dash_length: int = 10):
+        """Draw a dashed rectangle for occluded persons"""
+        x1, y1 = pt1
+        x2, y2 = pt2
+        
+        # Draw dashed lines for each side
+        # Top edge
+        for x in range(x1, x2, dash_length * 2):
+            cv2.line(frame, (x, y1), (min(x + dash_length, x2), y1), color, thickness)
+        # Bottom edge
+        for x in range(x1, x2, dash_length * 2):
+            cv2.line(frame, (x, y2), (min(x + dash_length, x2), y2), color, thickness)
+        # Left edge
+        for y in range(y1, y2, dash_length * 2):
+            cv2.line(frame, (x1, y), (x1, min(y + dash_length, y2)), color, thickness)
+        # Right edge
+        for y in range(y1, y2, dash_length * 2):
+            cv2.line(frame, (x2, y), (x2, min(y + dash_length, y2)), color, thickness)
+    
     def draw_annotations(self, frame: np.ndarray, detection: Dict[str, Any], result: Dict[str, Any]) -> np.ndarray:
-        """Draw professional annotations on frame"""
+        """Draw professional annotations on frame with occlusion handling"""
         annotated = frame.copy()
         
         # Bounding box with enhanced styling
         bbox = detection["bbox"]
         x, y, w, h = bbox
+        person_id = detection['id']
+        
+        # Check if person is occluded
+        is_occluded = False
+        if person_id in self.active_tracks:
+            track_info = self.active_tracks[person_id]
+            is_occluded = track_info.get("occluded", False)
+            occlusion_count = track_info.get("occlusion_count", 0)
         
         # Get color based on system state
         system_state = result.get("system_state", "normal").upper()
         color = self.get_system_state_color(system_state)
         
-        # Draw thick bounding box with glow effect
-        for i in range(3):
-            alpha = 255 - (i * 80)
-            cv2.rectangle(annotated, (x-i, y-i), (x + w + i, y + h + i), 
-                         (color[0], color[1], color[2]), 1)
-        cv2.rectangle(annotated, (x, y), (x + w, y + h), color, 3)
+        # Draw bounding box based on occlusion status
+        if is_occluded:
+            # Draw dashed bounding box for occluded person
+            self.draw_dashed_rectangle(annotated, (x, y), (x + w, y + h), color, 2)
+            # Draw occlusion label
+            occlusion_label = f"ID:{person_id} OCCLUDED ({occlusion_count}x)"
+            label_size = cv2.getTextSize(occlusion_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+            cv2.rectangle(annotated, (x, y - 30), (x + label_size[0] + 10, y - 10), (255, 255, 0), -1)
+            cv2.putText(annotated, occlusion_label, (x + 5, y - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        else:
+            # Draw solid bounding box for visible person
+            for i in range(3):
+                alpha = 255 - (i * 80)
+                cv2.rectangle(annotated, (x-i, y-i), (x + w + i, y + h + i), 
+                             (color[0], color[1], color[2]), 1)
+            cv2.rectangle(annotated, (x, y), (x + w, y + h), color, 3)
         
         # Enhanced label with background
         label = f"ID:{detection['id']} {system_state}"
@@ -448,33 +615,33 @@ class IntegratedGunDetectionSystem:
         cv2.putText(annotated, label, (x + 10, y - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         cv2.putText(annotated, score_text, (x + 10, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
         
-        # Add fight information if available
-        fight_detected = detection.get("fight_detected", False)
-        fight_confidence = detection.get("fight_confidence", 0.0)
+        # Add violence information if available
+        violence_detected = detection.get("violence_detected", False)
+        violence_confidence = detection.get("violence_confidence", 0.0)
         
-        if fight_detected:
-            # Draw fight detection with red styling
-            fight_color = (0, 0, 255)  # Red for fight
-            fight_label = f"🥊 FIGHT ID:{detection['id']}"
-            fight_conf_text = f"Fight:{fight_confidence:.2f}"
+        if violence_detected:
+            # Draw violence detection with red styling
+            violence_color = (0, 0, 255)  # Red for violence
+            violence_label = f"🥊 VIOLENCE ID:{detection['id']}"
+            violence_conf_text = f"Violence:{violence_confidence:.2f}"
             
-            # Draw fight indicator above all other elements
-            fight_label_size = cv2.getTextSize(fight_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-            cv2.rectangle(annotated, (x, y - 105), (x + fight_label_size[0] + 10, y - 80), fight_color, -1)
-            cv2.putText(annotated, fight_label, (x + 5, y - 88), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(annotated, fight_conf_text, (x + 5, y - 68), cv2.FONT_HERSHEY_SIMPLEX, 0.4, fight_color, 1)
+            # Draw violence indicator above all other elements
+            violence_label_size = cv2.getTextSize(violence_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+            cv2.rectangle(annotated, (x, y - 105), (x + violence_label_size[0] + 10, y - 80), violence_color, -1)
+            cv2.putText(annotated, violence_label, (x + 5, y - 88), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(annotated, violence_conf_text, (x + 5, y - 68), cv2.FONT_HERSHEY_SIMPLEX, 0.4, violence_color, 1)
             
             # Draw warning text
-            cv2.putText(annotated, "⚠️ VIOLENCE DETECTED", (x, y - 125), cv2.FONT_HERSHEY_SIMPLEX, 0.5, fight_color, 2)
+            cv2.putText(annotated, "⚠️ VIOLENCE DETECTED", (x, y - 125), cv2.FONT_HERSHEY_SIMPLEX, 0.5, violence_color, 2)
             
-            # Draw fight skeleton on frame
-            fight_info = {
+            # Draw violence bounding box on frame
+            violence_info = {
                 "person_id": detection['id'],
-                "fight_detected": fight_detected,
-                "confidence": fight_confidence,
+                "violence_detected": violence_detected,
+                "confidence": violence_confidence,
                 "bbox": bbox
             }
-            annotated = self.fight_detector.draw_fight_on_frame(annotated, fight_info, fight_color)
+            annotated = self.violence_detector.draw_violence_on_frame(annotated, violence_info)
         
         # Add pose information if available
         pose_type = detection.get("pose_type", "NORMAL")
@@ -504,7 +671,7 @@ class IntegratedGunDetectionSystem:
                 }
                 annotated = self.pose_detector.draw_pose_on_frame(annotated, pose_info, pose_color)
         
-        # Add weapon confidence indicators
+        # Add weapon confidence indicators with special styling for explosives
         confidences = []
         if detection.get("gun_conf", 0) > 0.1:
             confidences.append(f"🔫 Gun:{detection['gun_conf']:.2f}")
@@ -514,6 +681,35 @@ class IntegratedGunDetectionSystem:
             confidences.append(f"💥 Explosion:{detection['explosion_conf']:.2f}")
         if detection.get("grenade_conf", 0) > 0.1:
             confidences.append(f"🧨 Grenade:{detection['grenade_conf']:.2f}")
+        
+        # Draw red bounding boxes for explosives (grenade and explosion)
+        explosion_conf = detection.get("explosion_conf", 0)
+        grenade_conf = detection.get("grenade_conf", 0)
+        
+        if explosion_conf > 0.3 or grenade_conf > 0.3:
+            # Draw thick red bounding box for explosives
+            cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 0, 255), 5)  # Thick red box
+            
+            # Add explosive warning label
+            if explosion_conf > grenade_conf:
+                explosive_label = f"💥 EXPLOSION DETECTED"
+                conf_text = f"Explosion:{explosion_conf:.2f}"
+            else:
+                explosive_label = f"🧨 GRENADE DETECTED"
+                conf_text = f"Grenade:{grenade_conf:.2f}"
+            
+            # Draw explosive warning background
+            label_size = cv2.getTextSize(explosive_label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+            cv2.rectangle(annotated, (x, y - 50), (x + max(label_size[0] + 20, 350), y - 10), (0, 0, 255), -1)
+            cv2.rectangle(annotated, (x, y - 50), (x + max(label_size[0] + 20, 350), y - 10), (255, 255, 255), 2)
+            
+            # Draw explosive warning text
+            cv2.putText(annotated, explosive_label, (x + 10, y - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.putText(annotated, conf_text, (x + 10, y - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Add critical warning text
+            cv2.putText(annotated, "🚨 CRITICAL THREAT!", (annotated.shape[1] // 2 - 100, 100), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
         
         # Draw confidence indicators
         if confidences:
@@ -1182,7 +1378,7 @@ class IntegratedGunDetectionSystem:
         return annotated_frame
 
     def create_four_section_display(self, frame: np.ndarray, detections: List[Dict[str, Any]], 
-                                   results: List[Dict[str, Any]]) -> np.ndarray:
+                                   results: List[Dict[str, Any]], fire_smoke_result: Dict[str, Any] = None) -> np.ndarray:
         """Create 4-section display layout with larger main feed"""
         # Get original frame dimensions
         height, width = frame.shape[:2]
@@ -1193,6 +1389,10 @@ class IntegratedGunDetectionSystem:
         
         # Section 1: Original Feed with Detections (Left Side - 800x600) - Larger
         annotated_frame = self.draw_detections_on_frame(frame, detections)
+        
+        # Add fire-smoke detection on frame if available
+        if fire_smoke_result and (fire_smoke_result["fire_detected"] or fire_smoke_result["smoke_detected"]):
+            annotated_frame = self.fire_smoke_detector.draw_fire_smoke_on_frame(annotated_frame, fire_smoke_result)
         original_section = cv2.resize(annotated_frame, (800, 600))
         full_screen[60:660, 0:800] = original_section
         
@@ -1256,6 +1456,147 @@ class IntegratedGunDetectionSystem:
         
         return full_screen
     
+    def generate_detection_alerts(self, detections: List[Dict[str, Any]], fire_smoke_result: Dict[str, Any], results: List[Dict[str, Any]]):
+        """Generate JSON alerts for all detections and store in Firebase"""
+        current_alerts = []
+        
+        # Generate weapon detection alerts
+        for detection in detections:
+            if detection.get("meta", {}).get("class_name") in ["GUN", "KNIFE", "GRENADE", "EXPLOSION"]:
+                alert = self.alert_system.create_weapon_alert(detection, self.frame_count)
+                current_alerts.append(alert)
+                self.alert_system.print_alert_json(alert, "🚨 WEAPON DETECTED - BEEP BEEP BEEP 🚨")
+                
+                # Store in Firebase
+                alert_data = self.alert_system.alert_to_json(alert)
+                parsed_alert = json.loads(alert_data)
+                self.firebase_storage.store_alert(parsed_alert)
+        
+        # Generate violence detection alerts
+        for detection in detections:
+            if detection.get("violence_detected", False):
+                alert = self.alert_system.create_violence_alert(detection, self.frame_count)
+                current_alerts.append(alert)
+                self.alert_system.print_alert_json(alert, "🥊 VIOLENCE DETECTED - BEEP BEEP BEEP 🚨")
+                
+                # Store in Firebase
+                alert_data = self.alert_system.alert_to_json(alert)
+                parsed_alert = json.loads(alert_data)
+                self.firebase_storage.store_alert(parsed_alert)
+        
+        # Generate fire detection alerts
+        if fire_smoke_result.get("fire_detected", False):
+            fire_alerts = self.alert_system.create_fire_alert(fire_smoke_result, self.frame_count)
+            current_alerts.extend(fire_alerts)
+            for alert in fire_alerts:
+                self.alert_system.print_alert_json(alert, "🔥 FIRE DETECTED - EMERGENCY BEEP BEEP BEEP 🚨")
+                
+                # Store in Firebase
+                alert_data = self.alert_system.alert_to_json(alert)
+                parsed_alert = json.loads(alert_data)
+                self.firebase_storage.store_alert(parsed_alert)
+        
+        # Generate smoke detection alerts
+        if fire_smoke_result.get("smoke_detected", False):
+            smoke_alerts = self.alert_system.create_smoke_alert(fire_smoke_result, self.frame_count)
+            current_alerts.extend(smoke_alerts)
+            for alert in smoke_alerts:
+                self.alert_system.print_alert_json(alert, "💨 SMOKE DETECTED - EMERGENCY BEEP BEEP BEEP 🚨")
+                
+                # Store in Firebase
+                alert_data = self.alert_system.alert_to_json(alert)
+                parsed_alert = json.loads(alert_data)
+                self.firebase_storage.store_alert(parsed_alert)
+        
+        # Generate suspicious pose alerts
+        for detection in detections:
+            if detection.get("meta", {}).get("activity_type") == "aiming":
+                alert = self.alert_system.create_pose_alert(detection, self.frame_count, "AIMING")
+                current_alerts.append(alert)
+                self.alert_system.print_alert_json(alert, "🎯 SUSPICIOUS AIMING DETECTED - BEEP BEEP 🚨")
+                
+                # Store in Firebase
+                alert_data = self.alert_system.alert_to_json(alert)
+                parsed_alert = json.loads(alert_data)
+                self.firebase_storage.store_alert(parsed_alert)
+        
+        # Store summary in Firebase if we have alerts
+        if current_alerts:
+            self.alert_system.print_summary_json(current_alerts)
+            
+            # Store alert summary in Firebase
+            summary_data = self.alert_system.create_alert_summary(current_alerts)
+            summary_id = self.firebase_storage.store_alert_summary(summary_data)
+            
+            # Update system status in Firebase
+            system_status = {
+                "system_state": "EMERGENCY",
+                "active_alerts": len(current_alerts),
+                "camera_status": "ACTIVE",
+                "detection_count": len(detections),
+                "frame_count": self.frame_count,
+                "timestamp": datetime.now().isoformat()
+            }
+            self.firebase_storage.update_system_status(system_status)
+            
+            # Store evidence files in Firebase for each alert
+            for alert in current_alerts:
+                alert_id = alert.alert_id
+                detection_type = alert.detection_type
+                
+                # Get recent evidence file for this detection type
+                evidence_file = self.get_recent_evidence_file(detection_type)
+                if evidence_file and os.path.exists(evidence_file):
+                    print(f"📹 Storing evidence for {detection_type} alert: {alert_id}")
+                    evidence_url = self.firebase_storage.store_evidence_file(
+                        evidence_file, alert_id, detection_type
+                    )
+                    
+                    if evidence_url:
+                        print(f"✓ Evidence stored: {evidence_url}")
+                    else:
+                        print(f"❌ Failed to store evidence for {detection_type}")
+    
+    def get_recent_evidence_file(self, detection_type: str) -> Optional[str]:
+        """Get most recent evidence file for detection type"""
+        try:
+            evidence_dir = "evidence/videos"
+            
+            # Map detection types to evidence file prefixes
+            type_prefixes = {
+                "WEAPON": "weapon_detection",
+                "FIRE": "fire_detection", 
+                "SMOKE": "smoke_detection",
+                "VIOLENCE": "violence_detection",
+                "SUSPICIOUS_POSE": "suspicious_detection"
+            }
+            
+            prefix = type_prefixes.get(detection_type, "detection")
+            
+            if not os.path.exists(evidence_dir):
+                return None
+            
+            # Get all files with the matching prefix
+            matching_files = []
+            for file in os.listdir(evidence_dir):
+                if file.startswith(prefix) and file.endswith(".mp4"):
+                    file_path = os.path.join(evidence_dir, file)
+                    # Get file modification time
+                    mod_time = os.path.getmtime(file_path)
+                    matching_files.append((mod_time, file_path))
+            
+            # Sort by modification time (newest first)
+            matching_files.sort(reverse=True)
+            
+            if matching_files:
+                return matching_files[0][1]  # Return the most recent file path
+            
+            return None
+            
+        except Exception as e:
+            print(f"❌ Error getting evidence file: {e}")
+            return None
+    
     def run(self):
         """Main detection loop"""
         if not self.start_camera():
@@ -1283,13 +1624,32 @@ class IntegratedGunDetectionSystem:
                 self.frame_count += 1
                 
                 # Detect objects
-                detections = self.detect_objects(frame)
+                detections, fire_smoke_result = self.detect_objects(frame)
+                
+                # Check for fire/smoke emergency
+                if fire_smoke_result["fire_detected"] or fire_smoke_result["smoke_detected"]:
+                    # Trigger emergency state for fire/smoke
+                    emergency_type = "FIRE" if fire_smoke_result["fire_detected"] else "SMOKE"
+                    print(f"🚨 EMERGENCY STATE TRIGGERED: {emergency_type} DETECTED!")
+                    
+                    # Force system to emergency state
+                    if hasattr(self.decision_engine.state_agent, 'force_emergency_state'):
+                        self.decision_engine.state_agent.force_emergency_state(emergency_type)
+                    
+                    # Start emergency evidence recording
+                    if fire_smoke_result["fire_detected"]:
+                        self.evidence_agent.start_recording(f"fire_detection_{self.frame_count}")
+                    if fire_smoke_result["smoke_detected"]:
+                        self.evidence_agent.start_recording(f"smoke_detection_{self.frame_count}")
                 
                 # Process detections
                 results = self.process_detections(detections, frame)
                 
+                # Generate alerts for all detections
+                self.generate_detection_alerts(detections, fire_smoke_result, results)
+                
                 # Create 4-section display
-                display_frame = self.create_four_section_display(frame, detections, results)
+                display_frame = self.create_four_section_display(frame, detections, results, fire_smoke_result)
                 
                 # Display frame with professional window title
                 cv2.imshow("🎯 Intelligent Weapon Detection System | AI-Powered Security", display_frame)

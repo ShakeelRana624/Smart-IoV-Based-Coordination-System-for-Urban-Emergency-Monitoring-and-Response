@@ -50,7 +50,7 @@ class SystemState(Enum):
         return self.value
 
 class StateTransition:
-    """Manages system state transitions"""
+    """Manages system state transitions with violence detection tracking"""
     
     def __init__(self):
         self.current_state = SystemState.NORMAL
@@ -61,9 +61,14 @@ class StateTransition:
         self.threat_threshold = 0.4     # Medium confidence triggers threat detection
         self.emergency_threshold = 0.7  # High confidence triggers emergency
         
+        # Violence detection tracking
+        self.violence_detection_count = 0  # Continuous violence detection counter
+        self.violence_detection_threshold = 10  # 10 frames for stable violence detection
+        self.last_violence_frame = False
+        
     def update_state(self, detection: Dict[str, Any]) -> tuple[SystemState, bool]:
         """
-        Update system state based on detection
+        Update system state based on detection with violence tracking
         
         Returns:
             tuple: (new_state, state_changed)
@@ -75,12 +80,20 @@ class StateTransition:
         if new_state != old_state:
             self._record_state_change(old_state, new_state)
             self.current_state = new_state
+            
+            # Enhanced state change messages
+            violence_detected = detection.get("violence_detected", False)
+            if violence_detected:
+                print(f"🔄 STATE CHANGED: {old_state.value.upper()} → {new_state.value.upper()} (VIOLENCE DETECTED)")
+            else:
+                print(f"🔄 STATE CHANGED: {old_state.value.upper()} → {new_state.value.upper()}")
+            
             return new_state, True
         
         return old_state, False
     
     def _determine_new_state(self, detection: Dict[str, Any]) -> SystemState:
-        """Determine new state based on detection"""
+        """Determine new state based on detection with violence tracking"""
         # Get maximum weapon confidence
         gun_conf = detection.get("gun_conf", 0)
         knife_conf = detection.get("knife_conf", 0)
@@ -89,16 +102,53 @@ class StateTransition:
         
         max_confidence = max(gun_conf, knife_conf, explosion_conf, grenade_conf)
         
+        # Check for violence detection
+        violence_detected = detection.get("violence_detected", False)
+        violence_confidence = detection.get("violence_confidence", 0)
+        
+        # Track continuous violence detection
+        if violence_detected and violence_confidence > 0.5:
+            if self.last_violence_frame:
+                self.violence_detection_count += 1
+            else:
+                self.violence_detection_count = 1
+            self.last_violence_frame = True
+            
+            print(f"🥊 Violence detection count: {self.violence_detection_count}/{self.violence_detection_threshold}")
+        else:
+            self.violence_detection_count = 0
+            self.last_violence_frame = False
+        
         # Check for suspicious behavior
         is_suspicious = self._is_suspicious_behavior(detection)
         
-        # State transition logic
+        # Enhanced state transition logic with violence tracking
+        # Emergency for explosives (IMMEDIATE), stable violence detection (10+ frames), OR high confidence weapon
         if max_confidence >= self.emergency_threshold:
+            # Check for explosives specifically
+            if explosion_conf > 0.3 or grenade_conf > 0.3:
+                print(f"💥 EXPLOSIVE DETECTED! Immediate emergency state!")
+                return SystemState.EMERGENCY
+            else:
+                return SystemState.EMERGENCY
+        elif self.violence_detection_count >= self.violence_detection_threshold:
+            print(f"🚨 STABLE VIOLENCE DETECTED! Emergency state activated!")
             return SystemState.EMERGENCY
+        elif violence_detected and violence_confidence > 0.8:
+            return SystemState.EMERGENCY  # Very high confidence violence
+        
+        # Threat detection for medium confidence violence OR weapon
+        elif violence_detected and violence_confidence > 0.5:
+            return SystemState.THREAT_DETECTION
         elif max_confidence >= self.threat_threshold:
             return SystemState.THREAT_DETECTION
+        
+        # Suspicious for low confidence violence OR suspicious behavior
+        elif violence_detected and violence_confidence > 0.3:
+            return SystemState.SUSPICIOUS
         elif max_confidence >= self.suspicious_threshold or is_suspicious:
             return SystemState.SUSPICIOUS
+        
         else:
             return SystemState.NORMAL
     
@@ -185,26 +235,67 @@ class EmergencyManager:
         return emergency_response
     
     def _identify_threat_type(self, detection: Dict[str, Any]) -> str:
-        """Identify type of threat"""
+        """Identify type of threat including explosives detection"""
         gun_conf = detection.get("gun_conf", 0)
         knife_conf = detection.get("knife_conf", 0)
         explosion_conf = detection.get("explosion_conf", 0)
         grenade_conf = detection.get("grenade_conf", 0)
         
-        if gun_conf > 0.5:
+        # Check for violence detection
+        violence_detected = detection.get("violence_detected", False)
+        violence_confidence = detection.get("violence_confidence", 0)
+        
+        # Priority to explosives (IMMEDIATE THREAT)
+        if explosion_conf > 0.3:
+            return "EXPLOSIVE_EMERGENCY"
+        elif grenade_conf > 0.3:
+            return "GRENADE_EMERGENCY"
+        # Priority to violence detection if high confidence
+        elif violence_detected and violence_confidence > 0.7:
+            return "VIOLENCE_EMERGENCY"
+        elif violence_detected and violence_confidence > 0.5:
+            return "VIOLENCE_THREAT"
+        elif gun_conf > 0.5:
             return "FIREARM_THREAT"
-        elif explosion_conf > 0.5:
-            return "EXPLOSIVE_THREAT"
-        elif grenade_conf > 0.5:
-            return "GRENADE_THREAT"
         elif knife_conf > 0.5:
             return "WEAPON_THREAT"
+        elif violence_detected:
+            return "VIOLENCE_DETECTED"
         else:
             return "UNKNOWN_THREAT"
     
     def _initiate_emergency_actions(self, detection: Dict[str, Any]) -> List[str]:
-        """Initiate emergency response actions"""
+        """Initiate emergency response actions with explosives-specific responses"""
         actions = []
+        
+        # Check for explosives detection
+        explosion_conf = detection.get("explosion_conf", 0)
+        grenade_conf = detection.get("grenade_conf", 0)
+        
+        # Explosives-specific actions (IMMEDIATE PRIORITY)
+        if explosion_conf > 0.3 or grenade_conf > 0.3:
+            actions.extend([
+                "IMMEDIATE_EVACUATION",
+                "EXPLOSIVE_DISPOSAL_UNIT",
+                "PERIMETER_LOCKDOWN",
+                "EMERGENCY_SERVICES_ALERT",
+                "BOMB_SQUAD_DISPATCH"
+            ])
+            print(f"💥 Explosives emergency actions initiated!")
+        
+        # Check for violence detection
+        violence_detected = detection.get("violence_detected", False)
+        violence_confidence = detection.get("violence_confidence", 0)
+        
+        # Violence-specific actions
+        if violence_detected:
+            actions.extend([
+                "DISPATCH_SECURITY_TEAM",
+                "ACTIVATE_VIOLENCE_PROTOCOL",
+                "MEDICAL_RESPONSE_READY",
+                "CROWD_CONTROL_MEASURES"
+            ])
+            print(f"🥊 Violence emergency actions initiated!")
         
         # UAV dispatch
         if not self.uav_dispatched:
@@ -213,33 +304,84 @@ class EmergencyManager:
         
         # Authorities notification
         if not self.authorities_notified:
-            actions.append("NOTIFY_AUTHORITIES")
+            if explosion_conf > 0.3 or grenade_conf > 0.3:
+                actions.append("NOTIFY_BOMB_SQUAD")
+            elif violence_detected and violence_confidence > 0.7:
+                actions.append("NOTIFY_POLICE_EMERGENCY")
+            else:
+                actions.append("NOTIFY_AUTHORITIES")
             self.authorities_notified = True
         
         # Immediate alerts
-        actions.extend([
-            "ACTIVATE_ALL_ALARMS",
-            "LOCKDOWN_FACILITY",
-            "EMERGENCY_BROADCAST",
-            "EVACUATION_INITIATE"
-        ])
+        if explosion_conf > 0.3 or grenade_conf > 0.3:
+            actions.extend([
+                "ACTIVATE_EXPLOSIVE_ALARMS",
+                "IMMEDIATE_LOCKDOWN",
+                "EXPLOSIVE_BROADCAST",
+                "EVACUATION_PROTOCOL"
+            ])
+        elif violence_detected:
+            actions.extend([
+                "ACTIVATE_VIOLENCE_ALARMS",
+                "LOCKDOWN_IMMEDIATE",
+                "VIOLENCE_BROADCAST",
+                "SECURITY_RESPONSE"
+            ])
+        else:
+            actions.extend([
+                "ACTIVATE_ALL_ALARMS",
+                "LOCKDOWN_FACILITY",
+                "EMERGENCY_BROADCAST",
+                "EVACUATION_INITIATE"
+            ])
         
         self.emergency_actions.extend(actions)
         return actions
     
     def _determine_coordination_needs(self, detection: Dict[str, Any]) -> List[str]:
-        """Determine coordination requirements"""
+        """Determine coordination requirements with explosives-specific needs"""
         needs = []
         
         gun_conf = detection.get("gun_conf", 0)
         knife_conf = detection.get("knife_conf", 0)
+        explosion_conf = detection.get("explosion_conf", 0)
+        grenade_conf = detection.get("grenade_conf", 0)
         
+        # Check for violence detection
+        violence_detected = detection.get("violence_detected", False)
+        violence_confidence = detection.get("violence_confidence", 0)
+        
+        # Explosives-specific coordination needs (IMMEDIATE)
+        if explosion_conf > 0.3 or grenade_conf > 0.3:
+            needs.extend([
+                "BOMB_SQUAD_UNIT",
+                "EXPLOSIVE_ORDNANCE_DISPOSAL",
+                "EMERGENCY_EVACUATION_TEAM",
+                "PERIMETER_SECURITY",
+                "HAZMAT_TEAM"
+            ])
+            print(f"💥 Explosives coordination requirements activated!")
+        
+        # Violence-specific coordination needs
+        if violence_detected:
+            needs.extend([
+                "SECURITY_RESPONSE_TEAM",
+                "MEDICAL_EMERGENCY",
+                "CROWD_CONTROL_UNIT",
+                "SITUATION_ASSESSMENT"
+            ])
+            
+            if violence_confidence > 0.7:
+                needs.extend(["POLICE_BACKUP", "EMERGENCY_MEDICAL"])
+        
+        # Weapon-specific coordination needs
         if gun_conf > 0.5:
             needs.extend(["SWAT_TEAM", "NEGOTIATOR"])
         
         if knife_conf > 0.5:
             needs.extend(["SECURITY_TEAM", "MEDICAL_STANDBY"])
         
+        # General coordination
         needs.extend(["LAW_ENFORCEMENT", "EMERGENCY_SERVICES"])
         
         return needs
@@ -755,6 +897,8 @@ class EvidenceAgent:
         # Recording states - FIXED: Only one recording at a time
         self.is_recording = False
         self.weapon_detected = False
+        self.violence_detected = False  # Track violence detection separately
+        self.explosives_detected = False  # Track explosives detection separately
         self.normal_state_counter = 0
         self.normal_state_threshold = 100  # ENHANCED: 100 frames (3.3 seconds) after weapon disappears
         self.recording_completed = False  # Track if recording is completed for this session
@@ -793,13 +937,30 @@ class EvidenceAgent:
         # Check if weapon detected
         weapon_detected = self._is_weapon_detected(detection)
         
-        # FIXED LOGIC: Only record when weapon is detected, and only one recording
+        # FIXED LOGIC: Only record when weapon OR violence is detected, and only one recording
         if weapon_detected and not self.is_recording and not self.recording_completed:
             # Start recording with buffered frames
             self._start_recording(detection)
             self.weapon_detected = True
             self.last_detection_time = time.time()
-            print(f"🎯 Weapon detected! Started recording evidence")
+            
+            # Check if this is explosives, violence, or weapon detection
+            explosion_conf = detection.get("explosion_conf", 0)
+            grenade_conf = detection.get("grenade_conf", 0)
+            violence_detected = detection.get("violence_detected", False)
+            
+            if explosion_conf > 0.3:
+                print(f"💥 Explosion detected! Started recording evidence")
+                self.explosives_detected = True
+            elif grenade_conf > 0.3:
+                print(f"🧨 Grenade detected! Started recording evidence")
+                self.explosives_detected = True
+            elif violence_detected:
+                print(f"🥊 Violence detected! Started recording evidence")
+                self.violence_detected = True
+            else:
+                print(f"🎯 Weapon detected! Started recording evidence")
+                self.weapon_detected = True
         
         elif self.is_recording:
             if weapon_detected:
@@ -813,23 +974,42 @@ class EvidenceAgent:
                 if self.normal_state_counter >= self.normal_state_threshold:
                     self._stop_recording()
                     self.recording_completed = True  # Mark as completed to prevent new recordings
-                    print(f"✅ Weapon no longer detected. Recording completed.")
+                    if self.explosives_detected:
+                        print(f"✅ Explosives no longer detected. Recording completed.")
+                    elif self.violence_detected:
+                        print(f"✅ Violence no longer detected. Recording completed.")
+                    else:
+                        print(f"✅ Weapon no longer detected. Recording completed.")
                 else:
                     self._continue_recording(current_frame, detection, self.current_result)
         
         evidence_plan = self._plan_evidence_collection(decision, detection)
         
         state["evidence"] = evidence_plan
-        state["agent_messages"].append(f"EvidenceAgent: {'Recording' if self.is_recording else 'Monitoring'} evidence")
+        
+        # Enhanced evidence agent message
+        if self.is_recording:
+            if self.explosives_detected:
+                state["agent_messages"].append("EvidenceAgent: Recording explosives evidence")
+            elif self.violence_detected:
+                state["agent_messages"].append("EvidenceAgent: Recording violence evidence")
+            else:
+                state["agent_messages"].append("EvidenceAgent: Recording weapon evidence")
+        else:
+            state["agent_messages"].append("EvidenceAgent: Monitoring for threats")
         
         return state
     
     def _is_weapon_detected(self, detection: Dict[str, Any]) -> bool:
-        """Check if any weapon is detected with sufficient confidence OR aiming pose detected"""
+        """Check if any weapon is detected with sufficient confidence OR violence detected OR aiming pose detected"""
         gun_conf = detection.get("gun_conf", 0)
         knife_conf = detection.get("knife_conf", 0)
         explosion_conf = detection.get("explosion_conf", 0)  # If available
         grenade_conf = detection.get("grenade_conf", 0)  # If available
+        
+        # Check for violence detection
+        violence_detected = detection.get("violence_detected", False)
+        violence_confidence = detection.get("violence_confidence", 0)
         
         # Check for aiming pose activity
         activity = detection.get("meta", {}).get("activity", "Unknown")
@@ -840,10 +1020,21 @@ class EvidenceAgent:
         
         # ENHANCEMENT: Save evidence if:
         # 1. Weapon detected (any confidence > 0.4)
-        # 2. OR Weapon detected + Aiming pose (even low confidence weapon)
+        # 2. Violence detected (any confidence > 0.5)
+        # 3. Explosives detected (any confidence > 0.3) - IMMEDIATE PRIORITY
+        # 4. OR Weapon detected + Aiming pose (even low confidence weapon)
         weapon_plus_aiming = weapon_detected and is_aiming
         
-        if weapon_plus_aiming:
+        # Check for explosives detection (IMMEDIATE EVIDENCE)
+        explosives_detected = explosion_conf > 0.3 or grenade_conf > 0.3
+        
+        if explosives_detected:
+            print(f"💥 Evidence: Explosives detected! Explosion: {explosion_conf:.2f}, Grenade: {grenade_conf:.2f}")
+            return True
+        elif violence_detected and violence_confidence > 0.5:
+            print(f"🥊 Evidence: Violence detected! Confidence: {violence_confidence:.2f}")
+            return True
+        elif weapon_plus_aiming:
             print(f"🎯 Enhanced Evidence: Weapon + Aiming detected! Weapon: {max(gun_conf, knife_conf, explosion_conf, grenade_conf):.2f}, Pose: {activity}")
             return True
         elif weapon_detected:
@@ -861,10 +1052,27 @@ class EvidenceAgent:
             if self.is_recording:
                 return
             
-            # Generate unique filename
+            # Generate unique filename based on detection type
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             detection_id = detection.get("id", "unknown")
-            self.current_recording = f"weapon_detection_{detection_id}_{timestamp}.mp4"
+            
+            # Check for explosives detection (HIGHEST PRIORITY)
+            explosion_conf = detection.get("explosion_conf", 0)
+            grenade_conf = detection.get("grenade_conf", 0)
+            violence_detected = detection.get("violence_detected", False)
+            
+            if explosion_conf > 0.3:
+                self.current_recording = f"explosion_detection_{detection_id}_{timestamp}.mp4"
+                print(f"💥 Starting explosion evidence recording: {self.current_recording}")
+            elif grenade_conf > 0.3:
+                self.current_recording = f"grenade_detection_{detection_id}_{timestamp}.mp4"
+                print(f"🧨 Starting grenade evidence recording: {self.current_recording}")
+            elif violence_detected:
+                self.current_recording = f"violence_detection_{detection_id}_{timestamp}.mp4"
+                print(f"🥊 Starting violence evidence recording: {self.current_recording}")
+            else:
+                self.current_recording = f"weapon_detection_{detection_id}_{timestamp}.mp4"
+                print(f"🔫 Starting weapon evidence recording: {self.current_recording}")
             output_path = os.path.join(self.storage_path, self.current_recording)
             
             # Get frame dimensions from buffered frames or current frame
@@ -937,6 +1145,8 @@ class EvidenceAgent:
             self.current_recording = None
             self.recording_start_time = None
             self.weapon_detected = False
+            self.violence_detected = False  # Reset violence detection
+            self.explosives_detected = False  # Reset explosives detection
             self.normal_state_counter = 0
             # Note: recording_completed is set in the process method to control timing
     
@@ -999,6 +1209,9 @@ class EvidenceAgent:
         # ENHANCEMENT: Add weapon bounding box when weapon detected
         self._add_weapon_bounding_box(frame, detection)
         
+        # ENHANCEMENT: Add violence bounding box when violence detected
+        self._add_violence_bounding_box(frame, detection)
+        
         # Add system state indicator (top-right corner)
         cv2.putText(frame, f"State: {system_state_str}", (frame.shape[1] - 200, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, state_color, 2)
@@ -1014,12 +1227,20 @@ class EvidenceAgent:
         explosion_conf = detection.get("explosion_conf", 0)
         grenade_conf = detection.get("grenade_conf", 0)
         
+        # Add violence confidence indicator
+        violence_detected = detection.get("violence_detected", False)
+        violence_confidence = detection.get("violence_confidence", 0)
+        
         confidences = [
             ("Gun", gun_conf, (0, 0, 255)),
             ("Knife", knife_conf, (255, 165, 0)),
             ("Explosion", explosion_conf, (255, 0, 0)),
             ("Grenade", grenade_conf, (255, 0, 255))
         ]
+        
+        # Add violence detection to confidences if detected
+        if violence_detected:
+            confidences.append(("Violence", violence_confidence, (0, 0, 255)))  # Red for violence
         
         y_offset = 120
         for weapon_name, confidence, color in confidences:
@@ -1106,6 +1327,35 @@ class EvidenceAgent:
                 cv2.putText(frame, conf_text, 
                           (weapon_box_x, weapon_box_y + weapon_box_height + 15), 
                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+    
+    def _add_violence_bounding_box(self, frame: np.ndarray, detection: Dict[str, Any]):
+        """Add violence bounding box with red color when violence is detected"""
+        violence_detected = detection.get("violence_detected", False)
+        violence_confidence = detection.get("violence_confidence", 0)
+        
+        if violence_detected and violence_confidence > 0.5:
+            # Get person bounding box
+            bbox = detection.get("bbox", [0, 0, 0, 0])
+            if len(bbox) >= 4:
+                x, y, w, h = bbox[:4]
+                
+                # Draw thick red bounding box for violence (around entire person)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 4)  # Thick red box
+                
+                # Add violence label
+                violence_label = f"🥊 VIOLENCE"
+                conf_text = f"Conf: {violence_confidence:.2f}"
+                
+                # Background for violence label
+                label_size = cv2.getTextSize(violence_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+                cv2.rectangle(frame, (x, y - 50), (x + label_size[0] + 10, y - 10), (0, 0, 255), -1)
+                
+                # Violence label text
+                cv2.putText(frame, violence_label, (x + 5, y - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(frame, conf_text, (x + 5, y + h + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                
+                # Add warning text above the bounding box
+                cv2.putText(frame, "⚠️ VIOLENCE DETECTED", (x, y - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
     
     def _get_state_color(self, state: str) -> tuple:
         """Get color based on system state"""
@@ -1292,6 +1542,39 @@ class StateManagementAgent:
         summary = self.state_transition.get_state_summary()
         summary["emergency_active"] = self.emergency_manager.emergency_active
         return summary
+    
+    def force_emergency_state(self, emergency_type: str = "FIRE"):
+        """Force system to emergency state for fire/smoke detection"""
+        # Create emergency detection
+        emergency_detection = {
+            "id": 999,
+            "bbox": [0, 0, 100, 100],
+            "confidence": 1.0,
+            "class_name": emergency_type,
+            "weapon_type": "Emergency Threat",
+            "meta": {
+                "emergency_type": emergency_type,
+                "forced_emergency": True,
+                "timestamp": time.time()
+            },
+            "timestamp": time.time()
+        }
+        
+        # Force state transition to emergency
+        new_state, state_changed = self.state_transition.update_state(emergency_detection)
+        
+        # Activate emergency
+        emergency_response = self.emergency_manager.activate_emergency(emergency_detection)
+        
+        print(f"🚨 EMERGENCY STATE FORCED: {emergency_type}")
+        print(f"🔥 System State: {new_state.value}")
+        
+        return {
+            "state": new_state,
+            "state_changed": state_changed,
+            "emergency_response": emergency_response,
+            "emergency_type": emergency_type
+        }
 
 class MemoryAgent:
     """Maintains temporal context and learning"""

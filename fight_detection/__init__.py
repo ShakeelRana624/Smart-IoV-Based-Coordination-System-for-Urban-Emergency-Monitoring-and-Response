@@ -1,4 +1,4 @@
-# Fight Detection Module
-from .fight_detector import FightDetector
+# Violence Detection Module
+from .fight_detector import ViolenceDetector
 
-__all__ = ['FightDetector']
+__all__ = ['ViolenceDetector']

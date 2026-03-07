@@ -76,6 +76,32 @@ NOTIFICATION_CONFIG = {
     "sms_enabled": False
 }
 
+# Firebase Configuration
+FIREBASE_CONFIG = {
+    "service_account_key": "serviceAccountKey.json",
+    "storage_bucket": "weapon-detection-system.appspot.com",
+    "project_id": "weapon-detection-system",
+    "database_url": "https://weapon-detection-system-default-rtdb.firebaseio.com/",
+    "collections": {
+        "alerts": "detection_alerts",
+        "summaries": "alert_summaries",
+        "status": "system_status",
+        "evidence": "evidence_files"
+    },
+    "local_storage": {
+        "enabled": True,
+        "alerts_dir": "firebase_alerts",
+        "summaries_dir": "firebase_summaries",
+        "status_dir": "firebase_status",
+        "evidence_dir": "firebase_evidence"
+    },
+    "auto_cleanup": {
+        "enabled": True,
+        "days_to_keep": 30,
+        "max_files_per_dir": 1000
+    }
+}
+
 # Logging Configuration
 LOGGING_CONFIG = {
     "level": "INFO",
