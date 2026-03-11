@@ -714,8 +714,13 @@ def get_detections(frame, model, pose_model, confidence_threshold=0.35):
     for pose_result in pose_results:
         if pose_result.keypoints is not None:
             keypoints = pose_result.keypoints.xy.cpu().numpy()
-            pose_data.append(keypoints[0])  # First person's keypoints
-    
+            if keypoints.shape[0] > 0: 
+                pose_data.append(keypoints[0])
+            else:
+                pose_data.append(None)
+        else:
+            pose_data.append(None)
+            
     return detections, pose_data
 
 def draw_occlusion_status(frame, tracks):
@@ -865,7 +870,7 @@ class HumanTracker:
                 selected_pose = None
                 
                 for pose in pose_data:
-                    if len(pose) > 16:  # Ensure we have enough keypoints
+                    if pose is not None and len(pose) > 16:   # Ensure we have enough keypoints
                         pose_center = (pose[0][0], pose[0][1])  # Use nose as center
                         dist = np.sqrt((pose_center[0] - track_center[0])**2 + (pose_center[1] - track_center[1])**2)
                         if dist < min_dist:

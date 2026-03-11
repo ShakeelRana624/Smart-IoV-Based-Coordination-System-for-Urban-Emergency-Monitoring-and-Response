@@ -876,7 +876,7 @@ class DecisionCoordinatorAgent:
 class EvidenceAgent:
     """Intelligent video evidence collection agent with frame buffering"""
     
-    def __init__(self, buffer_size: int = 30, fps: int = 30):  # Changed fps to 30 for normal speed
+    def __init__(self, buffer_size: int = 15, fps: int = 15):  # Changed fps to 30 for normal speed
         self.buffer_size = buffer_size  # Number of frames to buffer before detection
         self.fps = fps  # Normal speed recording
         self.frame_buffer = deque(maxlen=buffer_size)
