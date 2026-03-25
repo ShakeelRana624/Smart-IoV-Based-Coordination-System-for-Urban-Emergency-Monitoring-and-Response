@@ -11,26 +11,27 @@ import torch
 from typing import Dict, List, Any, Tuple, Optional
 import time
 import os
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.append(str(Path(__file__).parent.parent))
+
+from utils.logging_system import get_logger
+from utils.error_handling import handle_errors, DetectionError, ModelError
 
 class ViolenceDetector:
     """Violence detection using violence.pt model"""
     
-    def __init__(self, model_path: str = "models/violence.pth"):
+    def __init__(self, model_path: str = "models/violence.pt"):
         """
         Initialize violence detector
         
         Args:
             model_path: Path to violence detection model
         """
-        try:
-            # Load the violence detection model using YOLOv8 instead of YOLOv5
-            from ultralytics import YOLO
-            self.model = YOLO(model_path)
-            self.model.conf = 0.7  # Set confidence threshold
-            print(f"✓ Violence model loaded: {model_path}")
-        except Exception as e:
-            print(f"❌ Failed to load violence model: {e}")
-            self.model = None
+        self.logger = get_logger()
+        self.model_path = model_path
         
         # Violence detection parameters
         self.confidence_threshold = 0.7
@@ -44,6 +45,33 @@ class ViolenceDetector:
         
         # Model input size (adjust based on your model requirements)
         self.input_size = (224, 224)  # Common size for violence detection models
+        
+        # Initialize model
+        self.model = None
+        self._load_model()
+    
+    @handle_errors(default_return=False, log_errors=True)
+    def _load_model(self) -> bool:
+        """Load violence detection model with proper error handling"""
+        try:
+            # Load the violence detection model using YOLOv8 instead of YOLOv5
+            from ultralytics import YOLO
+            self.model = YOLO(self.model_path)
+            self.model.conf = self.confidence_threshold  # Set confidence threshold
+            
+            self.logger.info(f"Violence model loaded successfully", extra={
+                "component": "ViolenceDetector",
+                "model_path": self.model_path,
+                "confidence_threshold": self.confidence_threshold
+            })
+            return True
+            
+        except FileNotFoundError:
+            raise ModelError(f"Violence model not found: {self.model_path}", 
+                            model_name=self.model_path)
+        except Exception as e:
+            raise ModelError(f"Failed to load violence model: {str(e)}", 
+                            model_name=self.model_path)
         
     def preprocess_frame_for_violence_detection(self, frame: np.ndarray, bbox: List[int]) -> np.ndarray:
         """
@@ -163,9 +191,9 @@ class ViolenceDetector:
                 # Update storage
                 self.detected_violence[person_id] = violence_info
                 
-                # Print violence detection info
+                # Log violence detection info
                 if is_violence:
-                    print(f"🥊 VIOLENCE DETECTED: Person {person_id} (confidence: {confidence:.2f})")
+                    self.logger.detection_event("violence", confidence, "system", person_id=person_id)
                     
                     # Update global violence status
                     self.violence_active = True
@@ -173,15 +201,24 @@ class ViolenceDetector:
                 
                 elif person_id in self.detected_violence and self.detected_violence[person_id].get("violence_detected", False):
                     # Violence was detected before but not now
-                    print(f"✅ VIOLENCE ENDED: Person {person_id}")
+                    self.logger.info(f"Violence ended for person {person_id}", extra={
+                        "component": "ViolenceDetector",
+                        "person_id": person_id,
+                        "event_type": "violence_ended"
+                    })
         
         except Exception as e:
-            print(f"Error in violence detection: {e}")
+            self.logger.error("Error in violence detection", exception=e, extra={
+                "component": "ViolenceDetector"
+            })
         
         # Check if any violence is still active
         if not any(info.get("violence_detected", False) for info in violence_results.values()):
             if self.violence_active:
-                print("✅ ALL VIOLENCE ENDED")
+                self.logger.info("All violence ended", extra={
+                    "component": "ViolenceDetector",
+                    "event_type": "all_violence_ended"
+                })
                 self.violence_active = False
         
         return violence_results

@@ -45,8 +45,6 @@ class AlertSystem:
         # Determine threat level
         if class_name in ["GUN", "KNIFE"]:
             threat_level = "HIGH"
-        elif class_name in ["GRENADE", "EXPLOSION"]:
-            threat_level = "CRITICAL"
         else:
             threat_level = "MEDIUM"
         

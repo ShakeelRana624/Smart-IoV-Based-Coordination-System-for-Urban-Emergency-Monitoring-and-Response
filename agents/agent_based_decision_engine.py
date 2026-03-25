@@ -14,6 +14,7 @@ import threading
 import cv2
 import numpy as np
 import os
+import json
 from datetime import datetime
 from typing import Dict, List, Any, Optional, TypedDict, Annotated
 from dataclasses import dataclass
@@ -28,6 +29,10 @@ try:
 except ImportError:
     HAS_SQLITE_CHECKPOINT = False
     print("Warning: SQLite checkpoint not available, using memory checkpoint")
+
+# Import professional systems
+from utils.logging_system import get_logger
+from utils.error_handling import handle_errors, DetectionError, ModelError, MemoryError
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.runnables import RunnableConfig
 
@@ -49,8 +54,180 @@ class SystemState(Enum):
     def __str__(self):
         return self.value
 
+class ThreatPriority(Enum):
+    """Priority levels for different threat types"""
+    CRITICAL = 4    # Explosives, Fire
+    HIGH = 3        # Guns, Active Violence
+    MEDIUM = 2      # Knives, Suspicious Activity
+    LOW = 1         # Suspicious Poses, Low Confidence
+
+class ConflictResolution:
+    """Manages multiple simultaneous detections with priority-based resolution"""
+    
+    def __init__(self):
+        self.active_detections = {}  # camera_id -> list of detections
+        self.detection_priorities = {
+            'explosion': ThreatPriority.CRITICAL,
+            'grenade': ThreatPriority.CRITICAL,
+            'fire': ThreatPriority.CRITICAL,
+            'gun': ThreatPriority.HIGH,
+            'violence': ThreatPriority.HIGH,
+            'knife': ThreatPriority.MEDIUM,
+            'suspicious': ThreatPriority.MEDIUM,
+            'pose': ThreatPriority.LOW
+        }
+        self.max_concurrent_alerts = 3  # Limit simultaneous alerts
+        self.alert_cooldown = {}  # camera_id -> last alert time
+    
+    def add_detection(self, camera_id: str, detection: Dict[str, Any]) -> Dict[str, Any]:
+        """Add detection and resolve conflicts with priority system"""
+        current_time = time.time()
+        
+        # Initialize camera detections if not exists
+        if camera_id not in self.active_detections:
+            self.active_detections[camera_id] = []
+        
+        # Add new detection
+        detection['camera_id'] = camera_id
+        detection['timestamp'] = current_time
+        self.active_detections[camera_id].append(detection)
+        
+        # Resolve conflicts and get priority detection
+        resolved_detection = self._resolve_conflicts(camera_id, current_time)
+        
+        # Clean old detections (older than 30 seconds)
+        self._cleanup_old_detections(current_time)
+        
+        return resolved_detection
+    
+    def _resolve_conflicts(self, camera_id: str, current_time: float) -> Dict[str, Any]:
+        """Resolve multiple detections using priority system"""
+        detections = self.active_detections.get(camera_id, [])
+        if not detections:
+            return {}
+        
+        # Sort detections by priority and confidence
+        prioritized_detections = []
+        
+        for detection in detections:
+            threat_type = self._get_threat_type(detection)
+            priority = self.detection_priorities.get(threat_type, ThreatPriority.LOW)
+            confidence = self._get_max_confidence(detection)
+            
+            prioritized_detections.append({
+                'detection': detection,
+                'priority': priority,
+                'confidence': confidence,
+                'threat_type': threat_type
+            })
+        
+        # Sort by priority (descending) then confidence (descending)
+        prioritized_detections.sort(
+            key=lambda x: (x['priority'].value, x['confidence']), 
+            reverse=True
+        )
+        
+        # Get highest priority detection
+        if prioritized_detections:
+            primary = prioritized_detections[0]
+            resolved = primary['detection'].copy()
+            
+            # Add conflict resolution metadata
+            resolved['conflict_resolution'] = {
+                'total_detections': len(detections),
+                'primary_threat': primary['threat_type'],
+                'priority_level': primary['priority'].name,
+                'other_threats': [d['threat_type'] for d in prioritized_detections[1:]],
+                'resolution_timestamp': current_time
+            }
+            
+            print(f"⚖️ CONFLICT RESOLVED: {primary['threat_type'].upper()} selected (Priority: {primary['priority'].name})")
+            if len(prioritized_detections) > 1:
+                other_threats = [d['threat_type'] for d in prioritized_detections[1:]]
+                print(f"   Other threats detected: {', '.join(other_threats)}")
+            
+            return resolved
+        
+        return {}
+    
+    def _get_threat_type(self, detection: Dict[str, Any]) -> str:
+        """Determine primary threat type from detection"""
+        if detection.get("explosion_conf", 0) > 0.3:
+            return 'explosion'
+        elif detection.get("grenade_conf", 0) > 0.3:
+            return 'grenade'
+        elif detection.get("fire_conf", 0) > 0.3:
+            return 'fire'
+        elif detection.get("gun_conf", 0) > 0.3:
+            return 'gun'
+        elif detection.get("violence_detected", False):
+            return 'violence'
+        elif detection.get("knife_conf", 0) > 0.3:
+            return 'knife'
+        elif detection.get("suspicious_detected", False):
+            return 'suspicious'
+        elif detection.get("pose_detected", False):
+            return 'pose'
+        else:
+            return 'unknown'
+    
+    def _get_max_confidence(self, detection: Dict[str, Any]) -> float:
+        """Get maximum confidence from detection"""
+        confidences = [
+            detection.get("gun_conf", 0),
+            detection.get("knife_conf", 0),
+            detection.get("explosion_conf", 0),
+            detection.get("grenade_conf", 0),
+            detection.get("fire_conf", 0),
+            detection.get("violence_confidence", 0),
+            detection.get("suspicious_confidence", 0),
+            detection.get("pose_confidence", 0)
+        ]
+        return max(confidences)
+    
+    def _cleanup_old_detections(self, current_time: float):
+        """Remove detections older than 30 seconds"""
+        for camera_id in list(self.active_detections.keys()):
+            detections = self.active_detections[camera_id]
+            # Keep only detections from last 30 seconds
+            recent_detections = [
+                d for d in detections 
+                if current_time - d.get('timestamp', 0) < 30
+            ]
+            self.active_detections[camera_id] = recent_detections
+            
+            # Remove empty camera entries
+            if not recent_detections:
+                del self.active_detections[camera_id]
+    
+    def get_active_situations(self) -> Dict[str, Any]:
+        """Get summary of all active threat situations"""
+        current_time = time.time()
+        summary = {
+            'total_cameras_with_detections': len(self.active_detections),
+            'total_detections': sum(len(detections) for detections in self.active_detections.values()),
+            'situations': {}
+        }
+        
+        for camera_id, detections in self.active_detections.items():
+            if detections:
+                # Get most recent detection for this camera
+                latest_detection = max(detections, key=lambda d: d.get('timestamp', 0))
+                threat_type = self._get_threat_type(latest_detection)
+                priority = self.detection_priorities.get(threat_type, ThreatPriority.LOW)
+                
+                summary['situations'][camera_id] = {
+                    'threat_type': threat_type,
+                    'priority': priority.name,
+                    'confidence': self._get_max_confidence(latest_detection),
+                    'detection_count': len(detections),
+                    'last_update': latest_detection.get('timestamp', 0)
+                }
+        
+        return summary
+
 class StateTransition:
-    """Manages system state transitions with violence detection tracking"""
+    """Manages system state transitions with violence detection tracking and disk persistence"""
     
     def __init__(self):
         self.current_state = SystemState.NORMAL
@@ -65,6 +242,12 @@ class StateTransition:
         self.violence_detection_count = 0  # Continuous violence detection counter
         self.violence_detection_threshold = 10  # 10 frames for stable violence detection
         self.last_violence_frame = False
+        
+        # State persistence
+        self.state_file = "data/system_state.json"
+        self.max_history_entries = 1000  # Limit history size
+        self._ensure_data_directory()
+        self._load_state_from_disk()  # Recover previous state on startup
         
     def update_state(self, detection: Dict[str, Any]) -> tuple[SystemState, bool]:
         """
@@ -97,10 +280,8 @@ class StateTransition:
         # Get maximum weapon confidence
         gun_conf = detection.get("gun_conf", 0)
         knife_conf = detection.get("knife_conf", 0)
-        explosion_conf = detection.get("explosion_conf", 0)
-        grenade_conf = detection.get("grenade_conf", 0)
         
-        max_confidence = max(gun_conf, knife_conf, explosion_conf, grenade_conf)
+        max_confidence = max(gun_conf, knife_conf)
         
         # Check for violence detection
         violence_detected = detection.get("violence_detected", False)
@@ -123,14 +304,9 @@ class StateTransition:
         is_suspicious = self._is_suspicious_behavior(detection)
         
         # Enhanced state transition logic with violence tracking
-        # Emergency for explosives (IMMEDIATE), stable violence detection (10+ frames), OR high confidence weapon
+        # Emergency for stable violence detection (10+ frames) OR high confidence weapon
         if max_confidence >= self.emergency_threshold:
-            # Check for explosives specifically
-            if explosion_conf > 0.3 or grenade_conf > 0.3:
-                print(f"💥 EXPLOSIVE DETECTED! Immediate emergency state!")
-                return SystemState.EMERGENCY
-            else:
-                return SystemState.EMERGENCY
+            return SystemState.EMERGENCY
         elif self.violence_detection_count >= self.violence_detection_threshold:
             print(f"🚨 STABLE VIOLENCE DETECTED! Emergency state activated!")
             return SystemState.EMERGENCY
@@ -187,6 +363,70 @@ class StateTransition:
         self.last_state_change = current_time
         
         print(f"🔄 State Transition: {old_state.value} → {new_state.value} (Duration: {duration:.2f}s)")
+        
+        # Save state to disk after transition
+        self._save_state_to_disk()
+    
+    def _ensure_data_directory(self):
+        """Ensure data directory exists for state storage"""
+        os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
+    
+    def _save_state_to_disk(self):
+        """Save current state and history to disk for recovery"""
+        try:
+            state_data = {
+                "current_state": self.current_state.value,
+                "last_state_change": self.last_state_change,
+                "state_history": self.state_history[-self.max_history_entries:],  # Limit history size
+                "state_durations": self.state_durations,
+                "violence_detection_count": self.violence_detection_count,
+                "last_violence_frame": self.last_violence_frame,
+                "save_timestamp": time.time(),
+                "save_datetime": datetime.now().isoformat()
+            }
+            
+            with open(self.state_file, 'w') as f:
+                json.dump(state_data, f, indent=2, default=str)
+            
+            print(f"💾 State saved to disk: {self.current_state.value}")
+            
+        except Exception as e:
+            print(f"❌ Failed to save state to disk: {e}")
+    
+    def _load_state_from_disk(self):
+        """Load previous state from disk for recovery"""
+        try:
+            if not os.path.exists(self.state_file):
+                print("🆕 No previous state found, starting fresh")
+                return
+            
+            with open(self.state_file, 'r') as f:
+                state_data = json.load(f)
+            
+            # Restore state
+            self.current_state = SystemState(state_data.get("current_state", "normal"))
+            self.last_state_change = state_data.get("last_state_change", time.time())
+            self.state_history = state_data.get("state_history", [])
+            self.state_durations = state_data.get("state_durations", {})
+            self.violence_detection_count = state_data.get("violence_detection_count", 0)
+            self.last_violence_frame = state_data.get("last_violence_frame", False)
+            
+            save_time = state_data.get("save_timestamp", 0)
+            time_since_save = time.time() - save_time
+            
+            print(f"🔄 State recovered from disk: {self.current_state.value}")
+            print(f"⏱️ Time since last save: {time_since_save:.1f} seconds")
+            print(f"📊 State history entries: {len(self.state_history)}")
+            
+            # If too much time has passed, reset to normal for safety
+            if time_since_save > 300:  # 5 minutes
+                print("⚠️ Long time since last save, resetting to NORMAL for safety")
+                self.current_state = SystemState.NORMAL
+                self._save_state_to_disk()
+            
+        except Exception as e:
+            print(f"❌ Failed to load state from disk: {e}")
+            print("🆕 Starting with fresh state")
     
     def get_state_summary(self) -> Dict[str, Any]:
         """Get comprehensive state summary"""
@@ -235,53 +475,30 @@ class EmergencyManager:
         return emergency_response
     
     def _identify_threat_type(self, detection: Dict[str, Any]) -> str:
-        """Identify type of threat including explosives detection"""
+        """Identify type of threat"""
         gun_conf = detection.get("gun_conf", 0)
         knife_conf = detection.get("knife_conf", 0)
-        explosion_conf = detection.get("explosion_conf", 0)
-        grenade_conf = detection.get("grenade_conf", 0)
         
         # Check for violence detection
         violence_detected = detection.get("violence_detected", False)
         violence_confidence = detection.get("violence_confidence", 0)
         
-        # Priority to explosives (IMMEDIATE THREAT)
-        if explosion_conf > 0.3:
-            return "EXPLOSIVE_EMERGENCY"
-        elif grenade_conf > 0.3:
-            return "GRENADE_EMERGENCY"
-        # Priority to violence detection if high confidence
-        elif violence_detected and violence_confidence > 0.7:
+        if violence_detected and violence_confidence > 0.7:
             return "VIOLENCE_EMERGENCY"
-        elif violence_detected and violence_confidence > 0.5:
-            return "VIOLENCE_THREAT"
-        elif gun_conf > 0.5:
-            return "FIREARM_THREAT"
-        elif knife_conf > 0.5:
-            return "WEAPON_THREAT"
+        elif gun_conf > 0.7:
+            return "WEAPON_EMERGENCY"
+        elif knife_conf > 0.7:
+            return "WEAPON_EMERGENCY"
         elif violence_detected:
             return "VIOLENCE_DETECTED"
+        elif gun_conf > 0.4 or knife_conf > 0.4:
+            return "WEAPON_DETECTED"
         else:
-            return "UNKNOWN_THREAT"
+            return "SUSPICIOUS_ACTIVITY"
     
     def _initiate_emergency_actions(self, detection: Dict[str, Any]) -> List[str]:
-        """Initiate emergency response actions with explosives-specific responses"""
+        """Initiate emergency response actions"""
         actions = []
-        
-        # Check for explosives detection
-        explosion_conf = detection.get("explosion_conf", 0)
-        grenade_conf = detection.get("grenade_conf", 0)
-        
-        # Explosives-specific actions (IMMEDIATE PRIORITY)
-        if explosion_conf > 0.3 or grenade_conf > 0.3:
-            actions.extend([
-                "IMMEDIATE_EVACUATION",
-                "EXPLOSIVE_DISPOSAL_UNIT",
-                "PERIMETER_LOCKDOWN",
-                "EMERGENCY_SERVICES_ALERT",
-                "BOMB_SQUAD_DISPATCH"
-            ])
-            print(f"💥 Explosives emergency actions initiated!")
         
         # Check for violence detection
         violence_detected = detection.get("violence_detected", False)
@@ -304,22 +521,11 @@ class EmergencyManager:
         
         # Authorities notification
         if not self.authorities_notified:
-            if explosion_conf > 0.3 or grenade_conf > 0.3:
-                actions.append("NOTIFY_BOMB_SQUAD")
-            elif violence_detected and violence_confidence > 0.7:
+            if violence_detected and violence_confidence > 0.7:
                 actions.append("NOTIFY_POLICE_EMERGENCY")
             else:
                 actions.append("NOTIFY_AUTHORITIES")
             self.authorities_notified = True
-        
-        # Immediate alerts
-        if explosion_conf > 0.3 or grenade_conf > 0.3:
-            actions.extend([
-                "ACTIVATE_EXPLOSIVE_ALARMS",
-                "IMMEDIATE_LOCKDOWN",
-                "EXPLOSIVE_BROADCAST",
-                "EVACUATION_PROTOCOL"
-            ])
         elif violence_detected:
             actions.extend([
                 "ACTIVATE_VIOLENCE_ALARMS",
@@ -339,28 +545,15 @@ class EmergencyManager:
         return actions
     
     def _determine_coordination_needs(self, detection: Dict[str, Any]) -> List[str]:
-        """Determine coordination requirements with explosives-specific needs"""
+        """Determine coordination requirements"""
         needs = []
         
         gun_conf = detection.get("gun_conf", 0)
         knife_conf = detection.get("knife_conf", 0)
-        explosion_conf = detection.get("explosion_conf", 0)
-        grenade_conf = detection.get("grenade_conf", 0)
         
         # Check for violence detection
         violence_detected = detection.get("violence_detected", False)
         violence_confidence = detection.get("violence_confidence", 0)
-        
-        # Explosives-specific coordination needs (IMMEDIATE)
-        if explosion_conf > 0.3 or grenade_conf > 0.3:
-            needs.extend([
-                "BOMB_SQUAD_UNIT",
-                "EXPLOSIVE_ORDNANCE_DISPOSAL",
-                "EMERGENCY_EVACUATION_TEAM",
-                "PERIMETER_SECURITY",
-                "HAZMAT_TEAM"
-            ])
-            print(f"💥 Explosives coordination requirements activated!")
         
         # Violence-specific coordination needs
         if violence_detected:
@@ -876,7 +1069,8 @@ class DecisionCoordinatorAgent:
 class EvidenceAgent:
     """Intelligent video evidence collection agent with frame buffering"""
     
-    def __init__(self, buffer_size: int = 15, fps: int = 15):  # Changed fps to 30 for normal speed
+    def __init__(self, buffer_size: int = 50, fps: int = 15):  # Enhanced buffer: 50 frames = 1.7 seconds pre-detection
+        self.logger = get_logger()
         self.buffer_size = buffer_size  # Number of frames to buffer before detection
         self.fps = fps  # Normal speed recording
         self.frame_buffer = deque(maxlen=buffer_size)
@@ -902,6 +1096,13 @@ class EvidenceAgent:
         self.normal_state_counter = 0
         self.normal_state_threshold = 300  # ENHANCED: 100 frames (3.3 seconds) after weapon disappears
         self.recording_completed = False  # Track if recording is completed for this session
+        
+        self.logger.info("EvidenceAgent initialized", extra={
+            "component": "EvidenceAgent",
+            "buffer_size": buffer_size,
+            "fps": fps,
+            "storage_path": self.storage_path
+        })
     
     def add_frame_to_buffer(self, frame: np.ndarray, timestamp: float = None):
         """Add frame to circular buffer for pre-detection evidence"""
@@ -1016,29 +1217,22 @@ class EvidenceAgent:
         is_aiming = activity.lower() == "aiming"
         
         # Enhanced weapon detection: Weapon OR (Weapon + Aiming)
-        weapon_detected = max(gun_conf, knife_conf, explosion_conf, grenade_conf) > 0.4
+        weapon_detected = max(gun_conf, knife_conf) > 0.4
         
         # ENHANCEMENT: Save evidence if:
         # 1. Weapon detected (any confidence > 0.4)
         # 2. Violence detected (any confidence > 0.5)
-        # 3. Explosives detected (any confidence > 0.3) - IMMEDIATE PRIORITY
-        # 4. OR Weapon detected + Aiming pose (even low confidence weapon)
+        # 3. OR Weapon detected + Aiming pose (even low confidence weapon)
         weapon_plus_aiming = weapon_detected and is_aiming
         
-        # Check for explosives detection (IMMEDIATE EVIDENCE)
-        explosives_detected = explosion_conf > 0.3 or grenade_conf > 0.3
-        
-        if explosives_detected:
-            print(f"💥 Evidence: Explosives detected! Explosion: {explosion_conf:.2f}, Grenade: {grenade_conf:.2f}")
-            return True
-        elif violence_detected and violence_confidence > 0.5:
+        if violence_detected and violence_confidence > 0.5:
             print(f"🥊 Evidence: Violence detected! Confidence: {violence_confidence:.2f}")
             return True
         elif weapon_plus_aiming:
-            print(f"🎯 Enhanced Evidence: Weapon + Aiming detected! Weapon: {max(gun_conf, knife_conf, explosion_conf, grenade_conf):.2f}, Pose: {activity}")
+            print(f"🎯 Enhanced Evidence: Weapon + Aiming detected! Weapon: {max(gun_conf, knife_conf):.2f}, Pose: {activity}")
             return True
         elif weapon_detected:
-            print(f"🔫 Evidence: Weapon detected! Confidence: {max(gun_conf, knife_conf, explosion_conf, grenade_conf):.2f}")
+            print(f"🔫 Evidence: Weapon detected! Confidence: {max(gun_conf, knife_conf):.2f}")
             return True
         elif is_aiming:
             print(f"👁️ Evidence: Aiming pose detected! (No weapon)")
@@ -1046,62 +1240,74 @@ class EvidenceAgent:
         
         return False
     
+    def _get_detection_type(self, detection: Dict[str, Any]) -> str:
+        """Determine detection type for filename"""
+        gun_conf = detection.get("gun_conf", 0)
+        knife_conf = detection.get("knife_conf", 0)
+        violence_detected = detection.get("violence_detected", False)
+        
+        if violence_detected:
+            return "violence_detection"
+        elif gun_conf > 0.4:
+            return "weapon_detection"
+        elif knife_conf > 0.4:
+            return "weapon_detection"
+        else:
+            return "threat_detection"
+    
+    @handle_errors(default_return=None, log_errors=True)
     def _start_recording(self, detection: Dict[str, Any]):
-        """Start video recording with buffered frames"""
+        """Start video recording with buffered frames and compression"""
         with self.recording_lock:
             if self.is_recording:
-                return
+                return None
             
-            # Generate unique filename based on detection type
+            # Generate unique filename
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            detection_id = detection.get("id", "unknown")
+            unique_id = str(int(time.time() * 1000))[-6:]
+            detection_type = self._get_detection_type(detection)
+            camera_id = detection.get("camera_id", "1")
             
-            # Check for explosives detection (HIGHEST PRIORITY)
-            explosion_conf = detection.get("explosion_conf", 0)
-            grenade_conf = detection.get("grenade_conf", 0)
-            violence_detected = detection.get("violence_detected", False)
-            
-            if explosion_conf > 0.3:
-                self.current_recording = f"explosion_detection_{detection_id}_{timestamp}.mp4"
-                print(f"💥 Starting explosion evidence recording: {self.current_recording}")
-            elif grenade_conf > 0.3:
-                self.current_recording = f"grenade_detection_{detection_id}_{timestamp}.mp4"
-                print(f"🧨 Starting grenade evidence recording: {self.current_recording}")
-            elif violence_detected:
-                self.current_recording = f"violence_detection_{detection_id}_{timestamp}.mp4"
-                print(f"🥊 Starting violence evidence recording: {self.current_recording}")
-            else:
-                self.current_recording = f"weapon_detection_{detection_id}_{timestamp}.mp4"
-                print(f"🔫 Starting weapon evidence recording: {self.current_recording}")
+            self.current_recording = f"{timestamp}_{unique_id}_{detection_type}_{camera_id}_{timestamp}.mp4"
             output_path = os.path.join(self.storage_path, self.current_recording)
             
-            # Get frame dimensions from buffered frames or current frame
+            # Setup video writer with compression
+            frame_size = (640, 480)  # Default frame size
             if self.frame_buffer:
                 sample_frame = self.frame_buffer[0]['frame']
-            else:
-                sample_frame = detection.get("frame")
+                frame_size = (sample_frame.shape[1], sample_frame.shape[0])
             
-            if sample_frame is not None:
-                height, width = sample_frame.shape[:2]
+            # Use H.264 codec for better compression
+            fourcc = cv2.VideoWriter_fourcc(*'H264')
+            self.video_writer = cv2.VideoWriter(
+                output_path, 
+                fourcc, 
+                self.fps, 
+                frame_size,
+                compression_params=[cv2.VIDEOWRITER_PROP_QUALITY, 85]  # 85% quality
+            )
+            
+            if self.video_writer.isOpened():
+                self.is_recording = True
+                self.recording_start_time = time.time()
                 
-                # Initialize video writer
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                self.video_writer = cv2.VideoWriter(
-                    output_path, fourcc, self.fps, (width, height)
-                )
+                # Write buffered frames first (pre-detection evidence)
+                self._write_buffered_frames()
                 
-                if self.video_writer.isOpened():
-                    self.is_recording = True
-                    self.recording_start_time = time.time()
-                    
-                    # Write buffered frames first (pre-detection evidence)
-                    self._write_buffered_frames()
-                    
-                    print(f"✓ EvidenceAgent: Started recording {self.current_recording}")
-                else:
-                    print(f"❌ EvidenceAgent: Failed to initialize video writer")
+                self.logger.info(f"Started compressed recording {self.current_recording}", extra={
+                    "component": "EvidenceAgent",
+                    "filename": self.current_recording,
+                    "detection_type": detection_type,
+                    "camera_id": camera_id
+                })
+                return output_path
             else:
-                print("❌ EvidenceAgent: No frame available for recording")
+                self.logger.error(f"Failed to open video writer for {output_path}", extra={
+                    "component": "EvidenceAgent",
+                    "output_path": output_path
+                })
+                self.video_writer = None
+                return None
     
     def _write_buffered_frames(self):
         """Write all buffered frames to video (pre-detection evidence)"""
@@ -1697,12 +1903,10 @@ class MemoryAgent:
             })
         
         return patterns
-
-# --------------------------
 # Agent-Based Decision Engine
 # --------------------------
 class AgentBasedDecisionEngine:
-    """Main engine coordinating all agents using LangGraph"""
+    """Enhanced decision engine with LangGraph agents and conflict resolution"""
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         # Initialize agents
@@ -1716,6 +1920,9 @@ class AgentBasedDecisionEngine:
         )
         self.notification_agent = NotificationAgent()
         self.memory_agent = MemoryAgent()
+        
+        # Initialize conflict resolution
+        self.conflict_resolver = ConflictResolution()
         
         # Keep original engine for compatibility
         self.legacy_engine = DecisionEngine(config)

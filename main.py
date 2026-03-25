@@ -19,6 +19,14 @@ import queue
 import math
 from collections import defaultdict
 
+# Add parent directory to path for imports
+sys.path.append(str(Path(__file__).parent))
+
+# Import professional systems
+from utils.logging_system import get_logger, setup_logging
+from utils.memory_manager import get_memory_manager, setup_memory_manager
+from utils.error_handling import get_error_handler, setup_error_handler, CameraError, StorageError
+
 # Add project root to Python path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
@@ -75,6 +83,10 @@ class FirebaseRealtimeDB:
     }
 
     def __init__(self):
+        self.logger = get_logger()
+        self.error_handler = get_error_handler()
+        self.memory_manager = get_memory_manager()
+        
         self.initialized = False
         self.app = None
         self.database_url = 'https://fypiov-default-rtdb.firebaseio.com/'
@@ -82,11 +94,8 @@ class FirebaseRealtimeDB:
         
         # Cloudinary video buffer configuration
         self.cloudinary_initialized = False
-        # =============== PER‑CAMERA BUFFERS ===============
-        self.camera_buffers = {}          # dict: camera_id -> list of frames
-        self.buffer_max_frames = 600     # per camera, keep last 5 seconds (30fps)
-        self.buffer_lock = threading.Lock()  # Thread safety
-        # ==================================================
+        
+        # Professional buffer management (replaces old system)
         self.post_detection_frames = {}      # Track frames after detection per camera
         self.post_detection_threshold = 300  # 10 seconds post-detection (300 frames at 30fps)
         self.detection_active = {} 
@@ -104,39 +113,59 @@ class FirebaseRealtimeDB:
         self._init_cloudinary()
 
     def start_post_detection_recording(self, camera_id):
-     with self.buffer_lock:
+        """Start post-detection recording using professional memory manager"""
         self.detection_active[camera_id] = True
         self.post_detection_frames[camera_id] = 0
-        print(f"📹 Post-detection recording started for camera {camera_id}")
+        self.logger.info(f"Post-detection recording started for camera {camera_id}", extra={
+            "component": "FirebaseRealtimeDB",
+            "camera_id": camera_id
+        })
 
     def add_post_detection_frame(self, camera_id, frame):
-     with self.buffer_lock:
+        """Add frame using professional memory manager"""
         if not self.detection_active.get(camera_id, False):
             return False
         
-        # Add to camera buffer
-        if camera_id not in self.camera_buffers:
-            self.camera_buffers[camera_id] = []
+        # Add frame to professional memory manager
+        success = self.memory_manager.add_frame(camera_id, frame, time.time())
         
-        self.camera_buffers[camera_id].append({
-            'frame': frame.copy(),
-            'timestamp': time.time()
-        })
-        
-        # Limit buffer size
-        if len(self.camera_buffers[camera_id]) > self.buffer_max_frames:
-            self.camera_buffers[camera_id].pop(0)
-        
-        # Increment post-detection counter
-        self.post_detection_frames[camera_id] += 1
-        
-        # Check if post-detection complete
-        if self.post_detection_frames[camera_id] >= self.post_detection_threshold:
-            self.detection_active[camera_id] = False
-            print(f"✅ Post-detection recording complete for camera {camera_id} ({self.post_detection_frames[camera_id]} frames)")
-            return True
+        if success:
+            # Increment post-detection counter
+            self.post_detection_frames[camera_id] = self.post_detection_frames.get(camera_id, 0) + 1
+            
+            # Check if post-detection complete
+            if self.post_detection_frames[camera_id] >= self.post_detection_threshold:
+                self.detection_active[camera_id] = False
+                self.logger.info(f"Post-detection recording complete for camera {camera_id} ({self.post_detection_frames[camera_id]} frames)", extra={
+                    "component": "FirebaseRealtimeDB",
+                    "camera_id": camera_id,
+                    "total_frames": self.post_detection_frames[camera_id]
+                })
+                return True
         
         return False
+    
+    def add_frame_to_buffer(self, frame, camera_id=None):
+        """Add frame to professional memory manager buffer"""
+        if frame is None or camera_id is None:
+            return False
+            
+        try:
+            if not isinstance(frame, np.ndarray) or len(frame.shape) != 3:
+                return False
+            
+            return self.memory_manager.add_frame(camera_id, frame, time.time())
+                
+        except Exception as e:
+            self.logger.error("Error adding frame to buffer", exception=e, extra={
+                "component": "FirebaseRealtimeDB",
+                "camera_id": camera_id
+            })
+            return False
+
+    def get_buffer_size(self, camera_id=None):
+        """Get current buffer size from professional memory manager"""
+        return self.memory_manager.get_buffer_size(camera_id)
     
     def _init(self):
         """Initialize Firebase Realtime Database"""
