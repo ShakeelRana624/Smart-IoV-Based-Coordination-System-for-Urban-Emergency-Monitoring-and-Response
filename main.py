@@ -1,8 +1,8 @@
 """
 Real-Time Weapon Detection System with Firebase Realtime Database and Cloudinary
-COMPLETE SOLUTION: Pre-buffering + Continuous buffering for guaranteed video upload
+COMPLETE SOLUTION: Only sends alerts to IOVs within 5km radius per camera
 Author: FYP Team
-Version: 7.4 - FINAL FIX: per-camera buffers, mobile video now uploads
+Version: 8.4 - FIXED: Each camera sends alerts ONLY to IOVs within its 5km radius
 """
 
 import sys
@@ -16,6 +16,7 @@ import numpy as np
 import threading
 import json
 import queue
+import math
 from collections import defaultdict
 
 # Add project root to Python path
@@ -57,8 +58,8 @@ class FirebaseRealtimeDB:
         'name': 'Wazirabad Security Camera',
         'address': 'Wazirabad, Pakistan',
         'city': 'Wazirabad',
-        'lat': 32.440418,
-        'lng': 74.120255,
+        'lat': 32.245430,
+        'lng': 74.163434,
         'type': 'Laptop Camera'
     }
     
@@ -68,8 +69,8 @@ class FirebaseRealtimeDB:
         'name': 'Gujranwala Security Camera',
         'address': 'Gujranwala, Pakistan',
         'city': 'Gujranwala',
-        'lat': 32.187691,
-        'lng': 74.194450,
+        'lat': 32.221250,
+        'lng': 74.172576,
         'type': 'Mobile Camera'
     }
 
@@ -83,9 +84,12 @@ class FirebaseRealtimeDB:
         self.cloudinary_initialized = False
         # =============== PER‑CAMERA BUFFERS ===============
         self.camera_buffers = {}          # dict: camera_id -> list of frames
-        self.buffer_max_frames = 150      # per camera, keep last 5 seconds (30fps)
+        self.buffer_max_frames = 600     # per camera, keep last 5 seconds (30fps)
         self.buffer_lock = threading.Lock()  # Thread safety
         # ==================================================
+        self.post_detection_frames = {}      # Track frames after detection per camera
+        self.post_detection_threshold = 300  # 10 seconds post-detection (300 frames at 30fps)
+        self.detection_active = {} 
         self.last_alert_time = 0
         self.video_cooldown = 5  # Seconds between uploads
         self.videos_uploaded = 0
@@ -99,6 +103,41 @@ class FirebaseRealtimeDB:
         self._init()
         self._init_cloudinary()
 
+    def start_post_detection_recording(self, camera_id):
+     with self.buffer_lock:
+        self.detection_active[camera_id] = True
+        self.post_detection_frames[camera_id] = 0
+        print(f"📹 Post-detection recording started for camera {camera_id}")
+
+    def add_post_detection_frame(self, camera_id, frame):
+     with self.buffer_lock:
+        if not self.detection_active.get(camera_id, False):
+            return False
+        
+        # Add to camera buffer
+        if camera_id not in self.camera_buffers:
+            self.camera_buffers[camera_id] = []
+        
+        self.camera_buffers[camera_id].append({
+            'frame': frame.copy(),
+            'timestamp': time.time()
+        })
+        
+        # Limit buffer size
+        if len(self.camera_buffers[camera_id]) > self.buffer_max_frames:
+            self.camera_buffers[camera_id].pop(0)
+        
+        # Increment post-detection counter
+        self.post_detection_frames[camera_id] += 1
+        
+        # Check if post-detection complete
+        if self.post_detection_frames[camera_id] >= self.post_detection_threshold:
+            self.detection_active[camera_id] = False
+            print(f"✅ Post-detection recording complete for camera {camera_id} ({self.post_detection_frames[camera_id]} frames)")
+            return True
+        
+        return False
+    
     def _init(self):
         """Initialize Firebase Realtime Database"""
         print("\n" + "=" * 60)
@@ -145,6 +184,7 @@ class FirebaseRealtimeDB:
             self.latest_ref = db.reference('latest_alert', app=self.app)
             self.stats_ref = db.reference('system_stats', app=self.app)
             self.cameras_ref = db.reference('cameras', app=self.app)
+            self.iovs_ref = db.reference('iovs', app=self.app)  # IOVs location reference
 
             # Save both cameras info
             cameras_info = {
@@ -388,10 +428,145 @@ class FirebaseRealtimeDB:
                 except:
                     pass
 
-    # ==================== send_alert with camera_info ====================
+    # =============== NEW FUNCTION: Calculate distance between two coordinates ===============
+    def calculate_distance(self, lat1, lon1, lat2, lon2):
+        """Calculate distance in km between two coordinates using Haversine formula"""
+        R = 6371  # Earth's radius in km
+        
+        lat1_rad = math.radians(lat1)
+        lat2_rad = math.radians(lat2)
+        delta_lat = math.radians(lat2 - lat1)
+        delta_lon = math.radians(lon2 - lon1)
+        
+        a = math.sin(delta_lat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(delta_lon/2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+        distance = R * c
+        
+        return distance
+
+    # =============== UPDATED FUNCTION: Get IOVs within 5km radius ===============
+    def get_nearby_iovs(self, camera_lat, camera_lng, max_distance_km=3.0):
+        """Get all active IOVs within specified radius (default 3km)"""
+        if not self.initialized:
+            print("❌ Firebase not initialized")
+            return []
+        
+        try:
+            # Get all IOVs from database
+            all_iovs = self.iovs_ref.get()
+            
+            if not all_iovs:
+                print("📡 No IOVs found in database")
+                return []
+            
+            nearby_iovs = []
+            current_time_ms = int(time.time() * 1000)
+            
+            for iov_id, iov_data in all_iovs.items():
+                # Check if IOV is active (status = 'online')
+                status = iov_data.get('status')
+                if status != 'online':
+                    continue
+                
+                # Check last update - within last 60 seconds
+                last_update = iov_data.get('lastUpdate', 0)
+                if current_time_ms - last_update > 60000:  # 60 seconds timeout
+                    continue
+                
+                # Get IOV location - YOUR EXACT FIELDS
+                iov_lat = iov_data.get('lat')
+                iov_lng = iov_data.get('lng')
+                
+                if iov_lat is None or iov_lng is None:
+                    continue
+                
+                # Calculate distance
+                distance = self.calculate_distance(camera_lat, camera_lng, iov_lat, iov_lng)
+                
+                # Check if within 5km
+                if distance <= max_distance_km:
+                    nearby_iovs.append({
+                        'iov_id': iov_id,
+                        'distance': round(distance, 2),
+                        'lat': iov_lat,
+                        'lng': iov_lng,
+                        'last_update': last_update,
+                        'username': iov_data.get('username', 'Unknown'),
+                        'carNumber': iov_data.get('carNumber', 'Unknown'),
+                        'role': iov_data.get('role', 'Unknown'),
+                        'accuracy': iov_data.get('accuracy', 0),
+                        'speed': iov_data.get('speed', 0),
+                        'userId': iov_data.get('userId', iov_id),
+                        'deviceInfo': iov_data.get('deviceInfo', {})
+                    })
+            
+            # Sort by distance (nearest first)
+            nearby_iovs.sort(key=lambda x: x['distance'])
+            
+            print(f"📡 Found {len(nearby_iovs)} IOVs within {max_distance_km}km")
+            for iov in nearby_iovs:
+                print(f"   🚗 {iov['carNumber']} - {iov['username']} - {iov['distance']}km away")
+            
+            return nearby_iovs
+            
+        except Exception as e:
+            print(f"❌ Error getting nearby IOVs: {e}")
+            return []
+
+    # =============== UPDATED FUNCTION: Send alert to specific IOV ===============
+    def send_alert_to_iov(self, iov_id, alert_data, camera_info):
+        """Send alert to a specific IOV"""
+        if not self.initialized:
+            return False
+        
+        try:
+            # Create IOV-specific alert reference
+            iov_alerts_ref = db.reference(f'iov_alerts/{iov_id}', app=self.app)
+            
+            # Prepare alert for this IOV
+            iov_alert = {
+                'alert_id': alert_data.get('id'),
+                'type': alert_data.get('type'),
+                'weapon_class': alert_data.get('weapon_class'),
+                'confidence': alert_data.get('confidence'),
+                'timestamp': alert_data.get('timestamp'),
+                'time': alert_data.get('time'),
+                'date': alert_data.get('date'),
+                'camera_id': alert_data.get('camera_id'),
+                'camera_name': alert_data.get('camera_name'),
+                'location': alert_data.get('location'),
+                'city': alert_data.get('city'),
+                'full_address': alert_data.get('full_address'),
+                'video_url': alert_data.get('video_url'),
+                'video_thumbnail': alert_data.get('video_thumbnail'),
+                'distance': alert_data.get('distance_to_iov', 0),  # Add distance to this IOV
+                'status': 'new',
+                'read': False,
+                'delivered_at': int(time.time() * 1000)
+            }
+            
+            # Send to IOV's inbox
+            iov_alerts_ref.push().set(iov_alert)
+            
+            # Also update IOV's latest alert
+            iov_latest_ref = db.reference(f'iovs/{iov_id}/latest_alert', app=self.app)
+            iov_latest_ref.set({
+                'alert_id': alert_data.get('id'),
+                'timestamp': alert_data.get('timestamp'),
+                'type': alert_data.get('type'),
+                'distance': alert_data.get('distance_to_iov', 0),
+                'video_url': alert_data.get('video_url')
+            })
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error sending alert to IOV {iov_id}: {e}")
+            return False
+
+    # =============== FIXED: send_alert with 5km filtering per camera ===============
     def send_alert(self, detection_data: dict, frame=None, camera_info=None) -> bool:
-        """Send alert to Firebase Realtime Database with optional video.
-           camera_info must be the full camera dictionary (CAMERA_WAZIRABAD or CAMERA_GUJRANWALA)."""
+        """Send alert ONLY to IOVs within 5km radius of the detecting camera"""
         if not self.initialized:
             print("❌ Firebase not initialized")
             return False
@@ -410,7 +585,7 @@ class FirebaseRealtimeDB:
             confidence = detection_data.get('confidence', 0.0)
             bbox = detection_data.get('bbox', None)
             
-            # =============== USE THE PROVIDED camera_info DIRECTLY ===============
+            # =============== GET CAMERA INFO FROM camera_info PARAMETER ===============
             camera_id = camera_info['id']
             camera_name = camera_info['name']
             camera_address = camera_info['address']
@@ -419,18 +594,40 @@ class FirebaseRealtimeDB:
             camera_lng = camera_info['lng']
             camera_type = camera_info['type']
             
+            # =============== FORCE CORRECT COORDINATES BASED ON CAMERA ID ===============
+            # This ensures Wazirabad always uses Wazirabad coordinates
+            # and Gujranwala always uses Gujranwala coordinates
+            if camera_id == 'CAM_WZD_001':
+                # Wazirabad coordinates (ensure these are correct)
+                camera_lat = 32.245430
+                camera_lng = 74.163434
+                camera_city = 'Wazirabad'
+                print(f"🔧 FORCED Wazirabad coordinates: {camera_lat}, {camera_lng}")
+            elif camera_id == 'CAM_GRW_001':
+                # Gujranwala coordinates
+                camera_lat = 32.221250
+                camera_lng = 74.172576
+                camera_city = 'Gujranwala'
+                print(f"🔧 FORCED Gujranwala coordinates: {camera_lat}, {camera_lng}")
+            # ===========================================================================
+            
             # Debug print to verify camera info
             print(f"📹 DEBUG - Sending alert from camera: {camera_name} at {camera_address}")
             print(f"📹 DEBUG - Camera ID: {camera_id}, City: {camera_city}")
+            print(f"📹 DEBUG - Coordinates: {camera_lat}, {camera_lng}")
             
             # Add frame to per‑camera buffer
             if frame is not None:
                 self.add_frame_to_buffer(frame, camera_id)
+    # ✅ Start post-detection recording
+                self.start_post_detection_recording(camera_id)
+                self.add_post_detection_frame(camera_id, frame)
             
             alert = {
                 'id': alert_id,
                 'type': str(weapon_type).upper(),
                 'weapon_class': str(weapon_type),
+                'class': str(weapon_type),
                 'confidence': round(float(confidence), 4),
                 'timestamp': timestamp_ms,
                 'time': datetime.now().strftime('%H:%M:%S'),
@@ -438,6 +635,7 @@ class FirebaseRealtimeDB:
                 'datetime': datetime.now().isoformat(),
                 'status': 'active',
                 'priority': detection_data.get('threat_level', 'HIGH'),
+                'threat_level': detection_data.get('threat_level', 'HIGH'),
                 'camera_id': camera_id,
                 'camera_name': camera_name,
                 'camera_type': camera_type,
@@ -509,10 +707,49 @@ class FirebaseRealtimeDB:
                     'height': int(bbox[3])
                 }
 
-            # =============== SEND TO FIREBASE ===============
+            # =============== FIXED: Get IOVs within 5km of THIS camera ===============
+            print(f"\n📍 Checking for IOVs within 3km of {camera_name} ({camera_city})...")
+            print(f"📍 USING COORDINATES: {camera_lat}, {camera_lng}")
+            
+            # Always use 5km radius for both cameras
+            nearby_iovs = self.get_nearby_iovs(camera_lat, camera_lng, 5.0)  # 👈 5km radius
+            
+            if nearby_iovs:
+                print(f"🚨 Found {len(nearby_iovs)} IOVs within 3km of {camera_city}!")
+                
+                # Send alert to each nearby IOV
+                alerts_sent = 0
+                for iov in nearby_iovs:
+                    # Add distance to alert for this IOV
+                    alert['distance_to_iov'] = iov['distance']
+                    
+                    if self.send_alert_to_iov(iov['iov_id'], alert, camera_info):
+                        alerts_sent += 1
+                        print(f"   ✅ Alert sent to {iov['carNumber']} ({iov['username']}) - {iov['distance']}km away")
+                
+                # Add list of targeted IOVs to main alert
+                targeted_iovs = {}
+                for i, iov in enumerate(nearby_iovs):
+                    targeted_iovs[str(i)] = {
+                        'iov_id': iov['iov_id'],
+                        'carNumber': iov['carNumber'],
+                        'username': iov['username'],
+                        'distance': iov['distance']
+                    }
+                alert['targeted_iovs'] = targeted_iovs
+                alert['total_iovs_notified'] = alerts_sent
+                
+                print(f"\n📨 Total IOVs notified in {camera_city} area: {alerts_sent}")
+            else:
+                print(f"⏸️ No IOVs within 3km radius of {camera_city}")
+                alert['total_iovs_notified'] = 0
+                alert['targeted_iovs'] = {}
+            # ==========================================================
+
+            # =============== SAVE MAIN ALERT TO FIREBASE ===============
             self.alerts_ref.child(alert_id).set(alert)
             self.latest_ref.set(alert)
-            # =================================================
+            # ============================================================
 
             self.alert_count += 1
             self.stats_ref.update({
@@ -532,6 +769,8 @@ class FirebaseRealtimeDB:
                 'videos_uploaded': self.videos_uploaded,
                 'cloudinary_enabled': self.cloudinary_initialized,
                 'video_speed': 'SLOW MOTION (15 FPS)',
+                'total_iovs_notified': alert.get('total_iovs_notified', 0),
+                'iov_range_km': 3,  # 👈 Added range info
                 'updated_at': datetime.now().isoformat()
             })
 
@@ -542,6 +781,8 @@ class FirebaseRealtimeDB:
             print(f"📹 Camera: {camera_name}")
             print(f"📍 Location: {camera_address}")
             print(f"📍 City: {camera_city}")
+            print(f"📍 Coordinates: {camera_lat}, {camera_lng}")
+            print(f"🚗 IOVs Notified (3km range in {camera_city}): {alert.get('total_iovs_notified', 0)}")
             if 'video_url' in alert:
                 print(f"📹 VIDEO INCLUDED: ✅")
             else:
@@ -979,10 +1220,10 @@ class WeaponDetectionApp:
             # Add status text
             cv2.putText(
                 combined,
-                f"Total Alerts: {self.total_alerts_sent} | Videos: {self.firebase_rt.videos_uploaded}",
+                f"Total Alerts: {self.total_alerts_sent} | Videos: {self.firebase_rt.videos_uploaded} | 3km IOVs: {self.firebase_rt.stats_ref.get().get('total_iovs_notified', 0) if self.firebase_rt.initialized else 0}",
                 (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
+                0.6,
                 (0, 255, 0),
                 2
             )
@@ -990,7 +1231,7 @@ class WeaponDetectionApp:
             # Add camera labels with colors
             cv2.putText(
                 combined,
-                "📍 WAZIRABAD (Laptop)",
+                "📍 WAZIRABAD (Laptop) - 3km Range",
                 (10, 100),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -999,7 +1240,7 @@ class WeaponDetectionApp:
             )
             cv2.putText(
                 combined,
-                "📍 GUJRANWALA (Mobile)",
+                "📍 GUJRANWALA (Mobile) - 3km Range",
                 (650, 100),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -1034,7 +1275,7 @@ class WeaponDetectionApp:
             frame = processed_frames[0]['frame']
             cv2.putText(
                 frame,
-                f"Alerts: {self.total_alerts_sent} | Videos: {self.firebase_rt.videos_uploaded}",
+                f"Alerts: {self.total_alerts_sent} | Videos: {self.firebase_rt.videos_uploaded} | 3km Range",
                 (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -1060,15 +1301,17 @@ class WeaponDetectionApp:
             working_count += 1
             print(f"  ✅ {self.firebase_rt.CAMERA_WAZIRABAD['name']} WORKING (30 FPS)")
             print(f"     📍 City: {self.firebase_rt.CAMERA_WAZIRABAD['city']}")
+            print(f"     📍 Coordinates: {self.firebase_rt.CAMERA_WAZIRABAD['lat']}, {self.firebase_rt.CAMERA_WAZIRABAD['lng']}")
         else:
             print(f"  ⚠️ {self.firebase_rt.CAMERA_WAZIRABAD['name']} NOT WORKING - Skipping")
         
         # 2. Try Gujranwala Camera (Mobile IP Webcam) - Optimized for stability
-        mobile_url = "http://192.168.1.4:8080/video?fps=15&resolution=320x240"
+        mobile_url = "http://192.168.1.6:8080/video?fps=15&resolution=320x240"
         if self.camera_handler.add_camera(mobile_url, self.firebase_rt.CAMERA_GUJRANWALA, fps_limit=15):
             working_count += 1
             print(f"  ✅ {self.firebase_rt.CAMERA_GUJRANWALA['name']} WORKING (15 FPS)")
             print(f"     📍 City: {self.firebase_rt.CAMERA_GUJRANWALA['city']}")
+            print(f"     📍 Coordinates: {self.firebase_rt.CAMERA_GUJRANWALA['lat']}, {self.firebase_rt.CAMERA_GUJRANWALA['lng']}")
         else:
             print(f"  ⚠️ {self.firebase_rt.CAMERA_GUJRANWALA['name']} NOT WORKING - Skipping")
             print("     📱 Make sure IP Webcam is running on your phone and connected to same network")
@@ -1089,20 +1332,22 @@ class WeaponDetectionApp:
     def run(self):
         """Main application loop"""
         
-        print("\n" + "=" * 60)
-        print("🎯 WEAPON DETECTION SYSTEM - DUAL LOCATION (FIXED)")
-        print("=" * 60)
-        print("🔧 FIXES APPLIED:")
-        print("   ✅ Only weapons detected (ignoring fire/smoke/person/grenade)")
-        print("   ✅ Only working cameras used")
-        print("   ✅ Proper location mapping (Wazirabad/Gujranwala) - now using explicit camera_info")
-        print("   ✅ Detection data extraction fixed (class from meta, confidence from weapon fields)")
-        print("   ✅ Removed automatic callback registration to avoid wrong location alerts")
-        print("   ✅ Per‑camera buffers – mobile video now uploads correctly")
-        print("=" * 60)
+        print("\n" + "=" * 70)
+        print("🎯 WEAPON DETECTION SYSTEM - 3KM IOV FILTERING PER CAMERA (v8.4 - FIXED)")
+        print("=" * 70)
+        print("📍 Camera 1: Wazirabad (CAM_WZD_001) - Laptop Camera")
+        print("📍 Camera 2: Gujranwala (CAM_GRW_001) - Mobile IP Webcam")
+        print("-" * 70)
+        print("🔧 FIXED FEATURE:")
+        print("   ✅ Wazirabad Camera → Alerts ONLY to IOVs within 3km of Wazirabad")
+        print("   ✅ Gujranwala Camera → Alerts ONLY to IOVs within 3km of Gujranwala")
+        print("   ✅ Force-applied correct coordinates for each camera")
+        print("   ✅ Active IOVs only (status='online' & last 60 seconds)")
+        print("   ✅ Built-in alert system DISABLED")
+        print("=" * 70)
         print(f"🔥 Firebase: {'✅' if self.firebase_rt.initialized else '❌'}")
         print(f"☁️ Cloudinary: {'✅' if self.firebase_rt.cloudinary_initialized else '❌'}")
-        print("=" * 60)
+        print("=" * 70)
 
         model_path = "models/best.pt"
         if not os.path.exists(model_path):
@@ -1112,6 +1357,41 @@ class WeaponDetectionApp:
         try:
             print("🚀 Initializing detection system...")
             self.detection_system = IntegratedGunDetectionSystem(model_path)
+            
+            # =============== 🔥 DISABLE BUILT-IN ALERTS ===============
+            print("🛑 Disabling built-in alert system...")
+            
+            # Method 1: Disable alert system if it has enabled flag
+            if hasattr(self.detection_system, 'alert_system'):
+                if hasattr(self.detection_system.alert_system, 'enabled'):
+                    self.detection_system.alert_system.enabled = False
+                    print("   ✅ Alert system disabled via enabled flag")
+                else:
+                    # Method 2: Monkey patch the send_alert method
+                    self.detection_system.send_alert = lambda *args, **kwargs: None
+                    print("   ✅ Alert system disabled via monkey patching")
+            
+            # Method 3: Disable Firebase alerts
+            if hasattr(self.detection_system, 'firebase_alerts'):
+                self.detection_system.firebase_alerts = False
+                print("   ✅ Firebase alerts disabled")
+            
+            # Method 4: Disable any alert generation
+            if hasattr(self.detection_system, 'generate_alerts'):
+                self.detection_system.generate_alerts = False
+                print("   ✅ Alert generation disabled")
+            
+            # Method 5: Override common alert methods (aggressive)
+            alert_methods = ['send_alert', 'trigger_alert', 'create_alert', 
+                           'send_firebase_alert', 'generate_detection_alerts']
+            for method_name in alert_methods:
+                if hasattr(self.detection_system, method_name):
+                    setattr(self.detection_system, method_name, lambda *args, **kwargs: None)
+                    print(f"   ✅ Overridden {method_name}")
+            
+            print("✅ Built-in alert system completely disabled")
+            # ==========================================================
+            
             # ❌ REMOVED: self.detection_system.add_detection_callback(self.on_detection_callback)
             # We call on_detection_callback manually with correct camera_info.
             print("✅ Detection system initialized (no automatic callback)\n")
@@ -1126,7 +1406,7 @@ class WeaponDetectionApp:
                 print(f"{'📹' * 20}\n")
                 
                 prebuffer_count = 0
-                prebuffer_target = 60
+                prebuffer_target = 600
                 
                 while prebuffer_count < prebuffer_target:
                     frames = self.camera_handler.get_frames()
@@ -1144,6 +1424,8 @@ class WeaponDetectionApp:
                     buf_size = self.firebase_rt.get_buffer_size(cam_id)
                     print(f"   📊 {cam['name']} buffer: {buf_size} frames")
                 print(f"✅ PRE-BUFFER COMPLETE!\n")
+                print("⏳ Waiting 5 seconds for buffer to stabilize...")
+                time.sleep(5)
 
             print("=" * 60)
             print("🚀 STARTING WEAPON DETECTION...")
@@ -1151,9 +1433,10 @@ class WeaponDetectionApp:
             print("📍 WORKING CAMERAS:")
             for cam in self.camera_handler.working_cameras:
                 print(f"   ✅ {cam['name']} - {cam['city']}")
+                print(f"      Coordinates: {cam['info']['lat']}, {cam['info']['lng']}")
+                print(f"      Range: 3km in {cam['city']} area")
             print("=" * 60)
-            print("⚠️ IGNORING: Fire, Smoke, Person, Grenade, Explosion")
-            print("🎯 ONLY DETECTING: Weapons (Guns, Knives, etc.)")
+            print("🚗 ALERTS TO: IOVs within 3km of detecting camera's city")
             print("=" * 60)
             print("Press 'q' to quit\n")
             
@@ -1179,7 +1462,7 @@ class WeaponDetectionApp:
                     self.frame_count += 1
                     
                     if self.firebase_rt.cloudinary_initialized:
-                        self.firebase_rt.add_frame_to_buffer(frame, camera_id)
+                        self.firebase_rt.add_post_detection_frame(camera_id, frame)
                         self.frames_added += 1
                     
                     try:
@@ -1234,10 +1517,7 @@ class WeaponDetectionApp:
                             self.on_detection_callback(alert_data)
                         # ========================================================================
                         
-                        # Generate system alerts (optional)
-                        self.detection_system.generate_detection_alerts(detections, fire_smoke, results)
-                        
-                        # Draw detections on frame (weapons only)
+                        # Draw detections on frame (weapons only) - NO alert generation!
                         display_frame = self.draw_detections_with_colors(
                             frame, weapon_detections, camera_id, camera_fps
                         )
@@ -1263,7 +1543,8 @@ class WeaponDetectionApp:
                     
                     # Add status info
                     working_text = f"Working Cameras: {len(self.camera_handler.working_cameras)}"
-                    ignore_text = "Ignoring: Fire/Smoke/Person/Grenade"
+                    ignore_text = ""
+                    range_text = "IOV Range: 3km PER CAMERA"
                     
                     cv2.putText(
                         combined_frame,
@@ -1285,7 +1566,17 @@ class WeaponDetectionApp:
                         2
                     )
                     
-                    cv2.imshow("Weapon Detection - Working Cameras Only - Press 'q' to quit", combined_frame)
+                    cv2.putText(
+                        combined_frame,
+                        range_text,
+                        (10, 150),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (255, 255, 0),
+                        2
+                    )
+                    
+                    cv2.imshow("Weapon Detection - 3KM IOV Alerts Per Camera - Press 'q' to quit", combined_frame)
                 
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     print("\n👋 Quit signal received")
@@ -1310,6 +1601,7 @@ class WeaponDetectionApp:
             print("=" * 60)
             print(f"   Total alerts sent: {self.total_alerts_sent}")
             print(f"   Videos uploaded: {self.firebase_rt.videos_uploaded}")
+            print(f"   IOV Range: 3km PER CAMERA")
             
             # Count alerts per camera
             wazirabad_alerts = 0
@@ -1321,9 +1613,18 @@ class WeaponDetectionApp:
                 elif 'GRW' in cam_id:
                     gujranwala_alerts += 1
             
-            print(f"   Wazirabad alerts: {wazirabad_alerts}")
-            print(f"   Gujranwala alerts: {gujranwala_alerts}")
+            print(f"   Wazirabad alerts: {wazirabad_alerts} (3km range in Wazirabad)")
+            print(f"   Gujranwala alerts: {gujranwala_alerts} (3km range in Gujranwala)")
             print(f"   Working cameras: {len(self.camera_handler.working_cameras)}")
+            
+            # Get total IOVs notified from stats
+            if self.firebase_rt.initialized:
+                try:
+                    stats = self.firebase_rt.stats_ref.get()
+                    print(f"   Total IOVs notified: {stats.get('total_iovs_notified', 0)}")
+                except:
+                    pass
+            
             print("=" * 60)
 
             # Update Firebase status
@@ -1336,7 +1637,10 @@ class WeaponDetectionApp:
                         'videos_uploaded': self.firebase_rt.videos_uploaded,
                         'active_cameras': len(self.camera_handler.working_cameras),
                         'wazirabad_alerts': wazirabad_alerts,
-                        'gujranwala_alerts': gujranwala_alerts
+                        'gujranwala_alerts': gujranwala_alerts,
+                        'iov_range_km': 3,
+                        'wazirabad_range_km': 3,
+                        'gujranwala_range_km': 3
                     })
                     print("✅ Firebase status updated")
                 except Exception as e:
@@ -1345,20 +1649,26 @@ class WeaponDetectionApp:
 
 def main():
     """Main entry point"""
+    """Main entry point for the weapon detection system"""
+    print("=" * 80)
+    print("🎯 INTELLIGENT WEAPON DETECTION SYSTEM")
+    print("   AI-Powered Real-Time Security Monitoring")
+    print("=" * 80)
+    
     print("\n" + "=" * 70)
-    print("🎯 WEAPON DETECTION SYSTEM - FINAL FIXED VERSION (v7.4)")
+    print("🎯 WEAPON DETECTION SYSTEM - 3KM IOV FILTERING PER CAMERA (v8.4)")
     print("=" * 70)
     print("📍 Camera 1: Wazirabad (CAM_WZD_001) - Laptop Camera")
+    print("   → Alerts to IOVs within 3km of Wazirabad ONLY")
     print("📍 Camera 2: Gujranwala (CAM_GRW_001) - Mobile IP Webcam")
+    print("   → Alerts to IOVs within 3km of Gujranwala ONLY")
     print("-" * 70)
-    print("🔧 FIXES:")
-    print("   ✅ Only weapons trigger alerts")
-    print("   ✅ Fire/Smoke/Person/Grenade/Explosion ignored")
-    print("   ✅ Only working cameras used")
-    print("   ✅ Proper location mapping (camera_info explicitly passed)")
-    print("   ✅ Detection data correctly extracted from integrated system")
-    print("   ✅ Automatic callback removed – no more wrong-location alerts")
-    print("   ✅ Per‑camera buffers – video always from correct camera")
+    print("🔧 FIXED FEATURE:")
+    print("   ✅ Wazirabad alerts → ONLY Wazirabad area IOVs")
+    print("   ✅ Gujranwala alerts → ONLY Gujranwala area IOVs")
+    print("   ✅ Force-applied correct coordinates")
+    print("   ✅ Active IOVs only (status='online' & last 60 seconds)")
+    print("   ✅ Built-in alert system DISABLED")
     print("=" * 70 + "\n")
     
     app = WeaponDetectionApp()

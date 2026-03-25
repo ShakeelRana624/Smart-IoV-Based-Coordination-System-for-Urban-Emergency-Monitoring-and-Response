@@ -900,7 +900,7 @@ class EvidenceAgent:
         self.violence_detected = False  # Track violence detection separately
         self.explosives_detected = False  # Track explosives detection separately
         self.normal_state_counter = 0
-        self.normal_state_threshold = 100  # ENHANCED: 100 frames (3.3 seconds) after weapon disappears
+        self.normal_state_threshold = 300  # ENHANCED: 100 frames (3.3 seconds) after weapon disappears
         self.recording_completed = False  # Track if recording is completed for this session
     
     def add_frame_to_buffer(self, frame: np.ndarray, timestamp: float = None):
@@ -1125,6 +1125,7 @@ class EvidenceAgent:
             annotated_frame = self._annotate_frame(frame, time.time(), "DETECTION", detection, result)
             self.video_writer.write(annotated_frame)
     
+    
     def _stop_recording(self):
         """Stop recording and save video"""
         with self.recording_lock:
@@ -1145,10 +1146,10 @@ class EvidenceAgent:
             self.current_recording = None
             self.recording_start_time = None
             self.weapon_detected = False
-            self.violence_detected = False  # Reset violence detection
-            self.explosives_detected = False  # Reset explosives detection
+            self.violence_detected = False
+            self.explosives_detected = False
             self.normal_state_counter = 0
-            # Note: recording_completed is set in the process method to control timing
+            self.recording_completed = False  # ✅ Reset for next detection
     
     def _annotate_frame(self, frame: np.ndarray, timestamp: float, status: str, 
                         detection: Dict[str, Any] = None, result: Dict[str, Any] = None) -> np.ndarray:
@@ -1709,7 +1710,10 @@ class AgentBasedDecisionEngine:
         self.state_agent = StateManagementAgent()
         self.threat_agent = ThreatAssessmentAgent()
         self.decision_agent = DecisionCoordinatorAgent()
-        self.evidence_agent = EvidenceAgent()
+        self.evidence_agent = EvidenceAgent(
+            buffer_size=150,  # 150 frames pre-detection (5 seconds at 30 fps)
+            fps=30           # 30 fps normal speed
+        )
         self.notification_agent = NotificationAgent()
         self.memory_agent = MemoryAgent()
         

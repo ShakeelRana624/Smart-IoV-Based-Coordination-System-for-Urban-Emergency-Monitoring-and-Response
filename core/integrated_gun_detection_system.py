@@ -1,8 +1,10 @@
 """
-Complete Integrated Gun Detection System
+Complete Integrated Gun Detection System with Enhanced UI
 
 Combines YOLO gun detection with agent-based decision making
 for real-time threat assessment and response.
+Features a professional 4-section display with live feed, bird's eye view,
+heatmap, and analytics panel.
 """
 
 import cv2
@@ -319,6 +321,7 @@ class IntegratedGunDetectionSystem:
             )
 
         return all_detections, fire_smoke_result
+    
     def process_frame(self, frame):
         """
         Process a single frame - wrapper for detection
@@ -515,7 +518,7 @@ class IntegratedGunDetectionSystem:
 
         # Detect poses for all persons in frame
         person_detections = [
-            d for d in detections if d.get("class_name") == "PERSON"
+            d for d in detections if d.get("meta", {}).get("class_name") == "PERSON"
         ]
         if person_detections:
             pose_results = self.pose_detector.detect_poses_in_frame(
@@ -1052,15 +1055,15 @@ class IntegratedGunDetectionSystem:
 
         confidences = []
         if detection.get("gun_conf", 0) > 0.1:
-            confidences.append(f"Gun:{detection['gun_conf']:.2f}")
+            confidences.append(f"🔫 Gun:{detection['gun_conf']:.2f}")
         if detection.get("knife_conf", 0) > 0.1:
-            confidences.append(f"Knife:{detection['knife_conf']:.2f}")
+            confidences.append(f"🔪 Knife:{detection['knife_conf']:.2f}")
         if detection.get("explosion_conf", 0) > 0.1:
             confidences.append(
-                f"Explosion:{detection['explosion_conf']:.2f}"
+                f"💥 Explosion:{detection['explosion_conf']:.2f}"
             )
         if detection.get("grenade_conf", 0) > 0.1:
-            confidences.append(f"Grenade:{detection['grenade_conf']:.2f}")
+            confidences.append(f"🧨 Grenade:{detection['grenade_conf']:.2f}")
 
         explosion_conf = detection.get("explosion_conf", 0)
         grenade_conf = detection.get("grenade_conf", 0)
@@ -1071,10 +1074,10 @@ class IntegratedGunDetectionSystem:
             )
 
             if explosion_conf > grenade_conf:
-                explosive_label = "EXPLOSION DETECTED"
+                explosive_label = "💥 EXPLOSION DETECTED"
                 conf_text = f"Explosion:{explosion_conf:.2f}"
             else:
-                explosive_label = "GRENADE DETECTED"
+                explosive_label = "🧨 GRENADE DETECTED"
                 conf_text = f"Grenade:{grenade_conf:.2f}"
 
             label_size = cv2.getTextSize(
@@ -1297,7 +1300,7 @@ class IntegratedGunDetectionSystem:
             stats_frame, (0, height - 40), (width, height), (0, 255, 0), 1
         )
 
-        controls = "[Q] Quit [S] Save [R] Reset [E] Evidence [W] Reset Rec"
+        controls = "[Q] Quit [S] Save [R] Reset [E] Evidence [W] Reset Recording"
         cv2.putText(
             stats_frame,
             controls,
@@ -1651,11 +1654,11 @@ class IntegratedGunDetectionSystem:
                 self.get_system_state_color(system_state.upper()),
             ),
             ("", "", (255, 255, 255)),
-            ("People Tracking", "", (0, 255, 0)),
+            ("👥 People Tracking", "", (0, 255, 0)),
             ("Current:", str(current_people), (0, 255, 255)),
             ("Total Unique:", str(total_unique_people), (0, 255, 255)),
             ("", "", (255, 255, 255)),
-            ("Agent Insights", "", (255, 165, 0)),
+            ("🤖 Agent Insights", "", (255, 165, 0)),
             (
                 "Threat Score:",
                 f"{agent_insights.get('max_threat_score', 0):.1f}",
@@ -1672,34 +1675,58 @@ class IntegratedGunDetectionSystem:
                 (255, 255, 0),
             ),
             (
-                "Memory:",
+                "Memory Contexts:",
                 str(agent_insights.get("memory_contexts", 0)),
                 (0, 255, 0),
             ),
             ("", "", (255, 255, 255)),
-            ("Threat Status", "", (255, 165, 0)),
+            ("🔍 Threat Status", "", (255, 165, 0)),
             (
-                "Total Det:",
+                "Total Detections:",
                 str(self.stats["total_detections"]),
                 (255, 255, 255),
             ),
             (
-                "Threats:",
+                "Threat Detections:",
                 str(self.stats["threat_detections"]),
                 (255, 165, 0),
             ),
             (
-                "Alerts:",
+                "Alerts Triggered:",
                 str(self.stats["alerts_triggered"]),
                 (255, 0, 0),
             ),
             ("", "", (255, 255, 255)),
-            ("System Status", "", (0, 255, 0)),
+            ("⚡ System Status", "", (0, 255, 0)),
             (
                 "FPS:",
                 f"{self.fps:.1f}",
                 (0, 255, 0),
             ),
+            (
+                "CPU:",
+                f"{agent_insights.get('cpu', 45)}%",
+                (255, 255, 0),
+            ),
+            (
+                "Memory:",
+                f"{agent_insights.get('memory', 512)}MB",
+                (255, 165, 0),
+            ),
+            ("", "", (255, 255, 255)),
+            ("📊 Session Info", "", (0, 255, 255)),
+            (
+                "Uptime:",
+                agent_insights.get("uptime", "00:00:00"),
+                (0, 255, 255),
+            ),
+            (
+                "Evidence Files:",
+                str(len([f for f in os.listdir("evidence/videos") if f.endswith(".mp4")])),
+                (0, 255, 255),
+            ),
+            ("", "", (255, 255, 255)),
+            ("📡 Callback Status", "", (255, 165, 0)),
             (
                 "Callbacks:",
                 str(len(self._detection_callbacks)),
@@ -1710,36 +1737,40 @@ class IntegratedGunDetectionSystem:
                 str(len(self.recent_detections)),
                 (255, 165, 0),
             ),
-            ("", "", (255, 255, 255)),
-            ("Session Info", "", (0, 255, 255)),
-            (
-                "Uptime:",
-                agent_insights.get("uptime", "00:00:00"),
-                (0, 255, 255),
-            ),
         ]
 
         y_offset = 50
         for label, value, color in analytics_data:
             if label:
-                cv2.putText(
-                    analytics,
-                    label,
-                    (10, y_offset),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.35,
-                    (200, 200, 200),
-                    1,
-                )
-                cv2.putText(
-                    analytics,
-                    value,
-                    (120, y_offset),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.35,
-                    color,
-                    1,
-                )
+                if label.startswith(("👥", "🤖", "🔍", "⚡", "📊", "📡")):
+                    cv2.putText(
+                        analytics,
+                        label,
+                        (10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.4,
+                        color,
+                        1,
+                    )
+                else:
+                    cv2.putText(
+                        analytics,
+                        label,
+                        (10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.35,
+                        (200, 200, 200),
+                        1,
+                    )
+                    cv2.putText(
+                        analytics,
+                        value,
+                        (120, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.35,
+                        color,
+                        1,
+                    )
             y_offset += 18
 
         cv2.putText(
@@ -1991,6 +2022,7 @@ class IntegratedGunDetectionSystem:
             weapon_class = (
                 detection.get("meta", {}).get("class_name", "Unknown").upper()
             )
+            weapon_type = detection.get("meta", {}).get("weapon_type", "Unknown")
             confidence = (
                 detection.get("meta", {}).get("raw_confidence", 0) * 100
             )
@@ -2129,7 +2161,7 @@ class IntegratedGunDetectionSystem:
         )
         cv2.putText(
             full_screen,
-            "INTELLIGENT WEAPON DETECTION SYSTEM | AI-Powered Security",
+            "🎯 INTELLIGENT WEAPON DETECTION SYSTEM | AI-Powered Security Monitoring",
             (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
@@ -2187,7 +2219,7 @@ class IntegratedGunDetectionSystem:
             1,
         )
 
-        controls = "[Q] Quit [S] Save [R] Reset [E] Evidence"
+        controls = "[Q] Quit [S] Save [R] Reset [E] Evidence [W] Reset Recording"
         cv2.putText(
             full_screen,
             controls,
@@ -2382,6 +2414,7 @@ class IntegratedGunDetectionSystem:
         print("Press 's' to save current frame")
         print("Press 'r' to reset statistics")
         print("Press 'e' to view evidence folder")
+        print("Press 'w' to reset evidence session")
 
         try:
             while True:
@@ -2449,7 +2482,7 @@ class IntegratedGunDetectionSystem:
                 )
 
                 cv2.imshow(
-                    "Intelligent Weapon Detection System",
+                    "🎯 Intelligent Weapon Detection System",
                     display_frame,
                 )
 
@@ -2559,12 +2592,13 @@ class IntegratedGunDetectionSystem:
 def main():
     """Main entry point"""
     print("=" * 60)
-    print("INTEGRATED GUN DETECTION SYSTEM")
+    print("INTEGRATED GUN DETECTION SYSTEM WITH ENHANCED UI")
     print("=" * 60)
 
     model_path = "models/best.pt"
     if not os.path.exists(model_path):
         print(f"❌ Error: {model_path} model not found!")
+        print(f"Please ensure {model_path} is available")
         return
 
     try:
