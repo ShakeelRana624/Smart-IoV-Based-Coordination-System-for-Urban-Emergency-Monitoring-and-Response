@@ -95,25 +95,10 @@ cd intelligent-weapon-detection
 ```
 
 2. **Install dependencies**
-```bash
-pip install -r requirements.txt
-```
-
-3. **Download AI models**
-- Place models in the `models/` directory:
-  - `best.pt` - Weapon detection model
-  - `violence.pt` - Violence detection model
-  - `fire-smoke.pt` - Fire/smoke detection model
-  - `yolov8n-pose.pt` - Pose detection model
-
-4. **Configure Firebase (Optional)**
-```bash
-python setup_firebase.py
-```
-Follow the setup wizard to configure Firebase cloud storage.
 
 ## 🚀 Quick Start
 
+### 📋 Prerequisites
 ### Basic Usage
 ```bash
 python main.py

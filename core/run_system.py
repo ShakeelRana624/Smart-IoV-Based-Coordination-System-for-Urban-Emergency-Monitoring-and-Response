@@ -366,59 +366,36 @@ class CameraHandler:
         camera_id = camera['id']
         capture = self.camera_captures[camera_id]
         frame_queue = self.frame_queues[camera_id]
-        frame_count = 0
-        
-        self.logger.info(f"Starting camera thread for {camera['name']}", extra={
-            "component": "CameraHandler",
-            "camera_id": camera_id
-        })
         
         while self.running:
             try:
                 ret, frame = capture.read()
                 if ret and frame is not None:
-                    frame_count += 1
                     frame_data = {
                         'frame': frame,
                         'camera_id': camera_id,
                         'camera_info': camera,
                         'timestamp': time.time(),
-                        'fps': 30.0,
-                        'frame_count': frame_count
+                        'fps': 30.0
                     }
                     
                     try:
                         frame_queue.put_nowait(frame_data)
-                        
-                        # Debug: Log every 100 frames
-                        if frame_count % 100 == 0:
-                            self.logger.debug(f"Camera {camera_id} processed {frame_count} frames", extra={
-                                "component": "CameraHandler",
-                                "camera_id": camera_id,
-                                "frame_count": frame_count
-                            })
-                            
                     except queue.Full:
                         try:
-                            # Remove old frame and add new one
                             frame_queue.get_nowait()
                             frame_queue.put_nowait(frame_data)
                         except queue.Empty:
                             pass
                 
-                time.sleep(0.01)  # Small delay to prevent excessive CPU usage
+                time.sleep(0.01)
                 
             except Exception as e:
                 self.logger.error(f"Camera thread error for {camera['name']}", exception=e, extra={
                     "component": "CameraHandler",
                     "camera_id": camera_id
                 })
-                time.sleep(0.1)  # Longer delay on error
-        
-        self.logger.info(f"Camera thread stopped for {camera['name']}", extra={
-            "component": "CameraHandler",
-            "camera_id": camera_id
-        })
+                time.sleep(0.1)
     
     def get_frames(self):
         """Get latest frames from all cameras"""
@@ -450,7 +427,7 @@ class IntegratedWeaponDetectionSystem:
     def __init__(self):
         # Setup professional systems
         self.logger = setup_logging()
-        self.memory_manager = setup_memory_manager(max_system_memory_mb=2048)
+        self.memory_manager = setup_memory_manager(max_memory_mb=2048)
         self.error_handler = setup_error_handler()
         
         # System state
@@ -462,8 +439,7 @@ class IntegratedWeaponDetectionSystem:
         self.firebase_rt = FirebaseRealtimeDB()
         
         # Initialize detection system
-        model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "best.pt")
-        self.detection_system = IntegratedGunDetectionSystem(model_path=model_path)
+        self.detection_system = IntegratedGunDetectionSystem()
         
         # Initialize camera handler
         cameras_config = [self.firebase_rt.CAMERA_WAZIRABAD, self.firebase_rt.CAMERA_GUJRANWALA]
@@ -574,60 +550,6 @@ class IntegratedWeaponDetectionSystem:
         last_status_time = time.time()
         status_interval = 60  # Log status every minute
         
-        # Display window setup
-        window_name = "Weapon Detection System"
-        
-        # Try different window modes
-        try:
-            cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
-            cv2.resizeWindow(window_name, 1280, 720)
-            print("✅ Window created with AUTOSIZE mode")
-        except:
-            try:
-                cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-                cv2.resizeWindow(window_name, 1280, 720)
-                print("✅ Window created with NORMAL mode")
-            except:
-                cv2.namedWindow(window_name)
-                print("✅ Window created with default mode")
-        
-        # Force window to show and focus
-        cv2.moveWindow(window_name, 100, 100)
-        
-        # Try fullscreen toggle to force visibility
-        try:
-            cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-            time.sleep(0.1)
-            cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
-        except:
-            pass
-        
-        # Additional window visibility tricks
-        import ctypes
-        try:
-            # Bring window to front (Windows specific)
-            hwnd = cv2.getWindowHandle(window_name)
-            ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
-        except:
-            pass  # Fallback if Windows-specific calls fail
-        
-        # Create initial test frame to verify window works
-        test_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        cv2.putText(test_frame, "WEAPON DETECTION SYSTEM", (120, 200), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.putText(test_frame, "INITIALIZING...", (200, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(test_frame, "Camera feed will appear here", (150, 300), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        cv2.putText(test_frame, "Press 'q' to quit", (220, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
-        
-        # Show test frame
-        cv2.imshow(window_name, test_frame)
-        cv2.waitKey(2000)  # Show for 2 seconds
-        
-        # Debug: Add frame counter
-        no_frame_count = 0
-        max_no_frames = 100  # Safety limit
-        window_shown = False
-        
         try:
             while self.running:
                 loop_start = time.time()
@@ -635,28 +557,7 @@ class IntegratedWeaponDetectionSystem:
                 # Get frames from all cameras
                 frames_data = self.camera_handler.get_frames()
                 
-                # Debug: Log frame availability
-                if len(frames_data) == 0:
-                    no_frame_count += 1
-                    if no_frame_count % 10 == 0:  # Log every 10 iterations
-                        self.logger.warning(f"No frames received for {no_frame_count} iterations", extra={
-                            "component": "IntegratedWeaponDetectionSystem",
-                            "no_frame_count": no_frame_count
-                        })
-                    
-                    # Safety: break if no frames for too long
-                    if no_frame_count > max_no_frames:
-                        self.logger.error("No frames received for too long, stopping system", extra={
-                            "component": "IntegratedWeaponDetectionSystem"
-                        })
-                        break
-                else:
-                    no_frame_count = 0  # Reset counter when frames received
-                
-                # Create display frame (show first available camera)
-                display_frame = None
-                processed_frame = None
-                
+                # Process each frame
                 for frame_data in frames_data:
                     frame = frame_data['frame']
                     camera_id = frame_data['camera_id']
@@ -664,8 +565,6 @@ class IntegratedWeaponDetectionSystem:
                     
                     if frame is not None:
                         self.frame_count += 1
-                        display_frame = frame.copy()  # Keep original for display
-                        processed_frame = frame  # Use for processing
                         
                         # Add to Firebase buffer if available
                         if self.firebase_rt.cloudinary_initialized:
@@ -674,66 +573,18 @@ class IntegratedWeaponDetectionSystem:
                         
                         # Process through detection system
                         try:
-                            detections, fire_smoke = self.detection_system.detect_objects(processed_frame)
-                            results = self.detection_system.process_detections(detections, processed_frame)
-                            
-                            # Draw detections on display frame
-                            display_frame = self._draw_detections(display_frame, detections, camera_info)
+                            detections, fire_smoke = self.detection_system.detect_objects(frame)
+                            results = self.detection_system.process_detections(detections, frame)
                             
                             # Handle detection callback
                             if detections:
-                                self._handle_detection(detections, camera_info, processed_frame)
+                                self._handle_detection(detections, camera_info, frame)
                             
                         except Exception as e:
                             self.logger.error("Detection processing error", exception=e, extra={
                                 "component": "IntegratedWeaponDetectionSystem",
                                 "camera_id": camera_id
                             })
-                        
-                        break  # Process only first camera for display
-                
-                # Show display frame or create placeholder
-                if display_frame is not None:
-                    # Add system info overlay
-                    display_frame = self._add_system_info(display_frame)
-                    cv2.imshow(window_name, display_frame)
-                    window_shown = True
-                else:
-                    # Create a placeholder frame when no camera feed
-                    placeholder_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                    
-                    # Add dynamic text based on frame count
-                    if no_frame_count > 0:
-                        cv2.putText(placeholder_frame, f"NO CAMERA FEED ({no_frame_count})", (150, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                        cv2.putText(placeholder_frame, "Waiting for camera...", (180, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    else:
-                        cv2.putText(placeholder_frame, "INITIALIZING CAMERA...", (160, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                        cv2.putText(placeholder_frame, "Please wait...", (220, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    
-                    # Add system info to placeholder
-                    placeholder_frame = self._add_system_info(placeholder_frame)
-                    cv2.imshow(window_name, placeholder_frame)
-                    window_shown = True
-                
-                # Force window to be visible (especially important first few frames)
-                if not window_shown and self.frame_count < 10:
-                    cv2.setWindowProperty(window_name, cv2.WND_PROP_VISIBLE, 1)
-                    # Try to bring window to front periodically
-                    if self.frame_count % 5 == 0:
-                        try:
-                            import ctypes
-                            hwnd = cv2.getWindowHandle(window_name)
-                            ctypes.windll.user32.SetForegroundWindow(hwnd)
-                        except:
-                            pass
-                
-                # Check for quit key
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    self.logger.info("Quit key pressed", extra={
-                        "component": "IntegratedWeaponDetectionSystem"
-                    })
-                    break
                 
                 # Periodic status logging
                 current_time = time.time()
@@ -754,65 +605,6 @@ class IntegratedWeaponDetectionSystem:
             self.logger.error("Error in detection loop", exception=e, extra={
                 "component": "IntegratedWeaponDetectionSystem"
             })
-        finally:
-            # Cleanup display window
-            cv2.destroyAllWindows()
-    
-    def _draw_detections(self, frame, detections, camera_info):
-        """Draw detection boxes and info on frame"""
-        for detection in detections:
-            bbox = detection.get('bbox', [])
-            if len(bbox) >= 4:
-                x, y, w, h = bbox[:4]
-                
-                # Get detection info
-                meta = detection.get('meta', {})
-                class_name = meta.get('class_name', 'Unknown')
-                confidence = detection.get('confidence', 0)
-                
-                # Color based on detection type
-                if 'gun' in class_name.lower() or 'rifle' in class_name.lower() or 'pistol' in class_name.lower():
-                    color = (0, 0, 255)  # Red for weapons
-                elif 'knife' in class_name.lower():
-                    color = (0, 165, 255)  # Orange for knives
-                else:
-                    color = (0, 255, 0)  # Green for others
-                
-                # Draw bounding box
-                cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-                
-                # Draw label
-                label = f"{class_name}: {confidence:.2f}"
-                label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
-                cv2.rectangle(frame, (x, y - label_size[1] - 10), (x + label_size[0], y), color, -1)
-                cv2.putText(frame, label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-        
-        # Add camera info
-        cv2.putText(frame, f"Camera: {camera_info['name']}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(frame, f"Location: {camera_info['city']}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        return frame
-    
-    def _add_system_info(self, frame):
-        """Add system information overlay"""
-        height, width = frame.shape[:2]
-        
-        # Create semi-transparent overlay for system info
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (width - 300, 10), (width - 10, 120), (0, 0, 0), -1)
-        frame = cv2.addWeighted(frame, 0.7, overlay, 0.3, 0)
-        
-        # Add system info
-        cv2.putText(frame, f"Frames: {self.frame_count}", (width - 290, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        cv2.putText(frame, f"Status: {'ACTIVE' if self.running else 'STOPPED'}", (width - 290, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        cv2.putText(frame, f"Memory: {self.memory_manager.get_buffer_size()} frames", (width - 290, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        cv2.putText(frame, f"Press 'q' to quit", (width - 290, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        
-        # Add timestamp
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cv2.putText(frame, timestamp, (10, height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        return frame
     
     def _print_camera_info(self):
         """Print camera information"""
@@ -838,6 +630,8 @@ class IntegratedWeaponDetectionSystem:
             confidence = (
                 detection.get('gun_conf', 0) or
                 detection.get('knife_conf', 0) or
+                detection.get('explosion_conf', 0) or
+                detection.get('grenade_conf', 0) or
                 meta.get('raw_confidence', 0)
             )
             
@@ -956,7 +750,7 @@ def main():
     print("=" * 80)
     
     # Check model
-    model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "best.pt")
+    model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "models", "best.pt")
     if not os.path.exists(model_path):
         print(f"❌ Error: {model_path} not found!")
         print("Please ensure best.pt is in models/ directory")

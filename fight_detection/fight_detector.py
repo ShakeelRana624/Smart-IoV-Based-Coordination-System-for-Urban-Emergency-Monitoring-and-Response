@@ -23,7 +23,7 @@ from utils.error_handling import handle_errors, DetectionError, ModelError
 class ViolenceDetector:
     """Violence detection using violence.pt model"""
     
-    def __init__(self, model_path: str = "models/violence.pt"):
+    def __init__(self, model_path: str = "models/violence.pth"):
         """
         Initialize violence detector
         

@@ -280,8 +280,10 @@ class StateTransition:
         # Get maximum weapon confidence
         gun_conf = detection.get("gun_conf", 0)
         knife_conf = detection.get("knife_conf", 0)
+        explosion_conf = detection.get("explosion_conf", 0)
+        grenade_conf = detection.get("grenade_conf", 0)
         
-        max_confidence = max(gun_conf, knife_conf)
+        max_confidence = max(gun_conf, knife_conf, explosion_conf, grenade_conf)
         
         # Check for violence detection
         violence_detected = detection.get("violence_detected", False)
@@ -304,9 +306,14 @@ class StateTransition:
         is_suspicious = self._is_suspicious_behavior(detection)
         
         # Enhanced state transition logic with violence tracking
-        # Emergency for stable violence detection (10+ frames) OR high confidence weapon
+        # Emergency for explosives (IMMEDIATE), stable violence detection (10+ frames), OR high confidence weapon
         if max_confidence >= self.emergency_threshold:
-            return SystemState.EMERGENCY
+            # Check for explosives specifically
+            if explosion_conf > 0.3 or grenade_conf > 0.3:
+                print(f"💥 EXPLOSIVE DETECTED! Immediate emergency state!")
+                return SystemState.EMERGENCY
+            else:
+                return SystemState.EMERGENCY
         elif self.violence_detection_count >= self.violence_detection_threshold:
             print(f"🚨 STABLE VIOLENCE DETECTED! Emergency state activated!")
             return SystemState.EMERGENCY
@@ -475,30 +482,53 @@ class EmergencyManager:
         return emergency_response
     
     def _identify_threat_type(self, detection: Dict[str, Any]) -> str:
-        """Identify type of threat"""
+        """Identify type of threat including explosives detection"""
         gun_conf = detection.get("gun_conf", 0)
         knife_conf = detection.get("knife_conf", 0)
+        explosion_conf = detection.get("explosion_conf", 0)
+        grenade_conf = detection.get("grenade_conf", 0)
         
         # Check for violence detection
         violence_detected = detection.get("violence_detected", False)
         violence_confidence = detection.get("violence_confidence", 0)
         
-        if violence_detected and violence_confidence > 0.7:
+        # Priority to explosives (IMMEDIATE THREAT)
+        if explosion_conf > 0.3:
+            return "EXPLOSIVE_EMERGENCY"
+        elif grenade_conf > 0.3:
+            return "GRENADE_EMERGENCY"
+        # Priority to violence detection if high confidence
+        elif violence_detected and violence_confidence > 0.7:
             return "VIOLENCE_EMERGENCY"
-        elif gun_conf > 0.7:
-            return "WEAPON_EMERGENCY"
-        elif knife_conf > 0.7:
-            return "WEAPON_EMERGENCY"
+        elif violence_detected and violence_confidence > 0.5:
+            return "VIOLENCE_THREAT"
+        elif gun_conf > 0.5:
+            return "FIREARM_THREAT"
+        elif knife_conf > 0.5:
+            return "WEAPON_THREAT"
         elif violence_detected:
             return "VIOLENCE_DETECTED"
-        elif gun_conf > 0.4 or knife_conf > 0.4:
-            return "WEAPON_DETECTED"
         else:
-            return "SUSPICIOUS_ACTIVITY"
+            return "UNKNOWN_THREAT"
     
     def _initiate_emergency_actions(self, detection: Dict[str, Any]) -> List[str]:
-        """Initiate emergency response actions"""
+        """Initiate emergency response actions with explosives-specific responses"""
         actions = []
+        
+        # Check for explosives detection
+        explosion_conf = detection.get("explosion_conf", 0)
+        grenade_conf = detection.get("grenade_conf", 0)
+        
+        # Explosives-specific actions (IMMEDIATE PRIORITY)
+        if explosion_conf > 0.3 or grenade_conf > 0.3:
+            actions.extend([
+                "IMMEDIATE_EVACUATION",
+                "EXPLOSIVE_DISPOSAL_UNIT",
+                "PERIMETER_LOCKDOWN",
+                "EMERGENCY_SERVICES_ALERT",
+                "BOMB_SQUAD_DISPATCH"
+            ])
+            print(f"💥 Explosives emergency actions initiated!")
         
         # Check for violence detection
         violence_detected = detection.get("violence_detected", False)
@@ -521,11 +551,22 @@ class EmergencyManager:
         
         # Authorities notification
         if not self.authorities_notified:
-            if violence_detected and violence_confidence > 0.7:
+            if explosion_conf > 0.3 or grenade_conf > 0.3:
+                actions.append("NOTIFY_BOMB_SQUAD")
+            elif violence_detected and violence_confidence > 0.7:
                 actions.append("NOTIFY_POLICE_EMERGENCY")
             else:
                 actions.append("NOTIFY_AUTHORITIES")
             self.authorities_notified = True
+        
+        # Immediate alerts
+        if explosion_conf > 0.3 or grenade_conf > 0.3:
+            actions.extend([
+                "ACTIVATE_EXPLOSIVE_ALARMS",
+                "IMMEDIATE_LOCKDOWN",
+                "EXPLOSIVE_BROADCAST",
+                "EVACUATION_PROTOCOL"
+            ])
         elif violence_detected:
             actions.extend([
                 "ACTIVATE_VIOLENCE_ALARMS",
@@ -545,15 +586,28 @@ class EmergencyManager:
         return actions
     
     def _determine_coordination_needs(self, detection: Dict[str, Any]) -> List[str]:
-        """Determine coordination requirements"""
+        """Determine coordination requirements with explosives-specific needs"""
         needs = []
         
         gun_conf = detection.get("gun_conf", 0)
         knife_conf = detection.get("knife_conf", 0)
+        explosion_conf = detection.get("explosion_conf", 0)
+        grenade_conf = detection.get("grenade_conf", 0)
         
         # Check for violence detection
         violence_detected = detection.get("violence_detected", False)
         violence_confidence = detection.get("violence_confidence", 0)
+        
+        # Explosives-specific coordination needs (IMMEDIATE)
+        if explosion_conf > 0.3 or grenade_conf > 0.3:
+            needs.extend([
+                "BOMB_SQUAD_UNIT",
+                "EXPLOSIVE_ORDNANCE_DISPOSAL",
+                "EMERGENCY_EVACUATION_TEAM",
+                "PERIMETER_SECURITY",
+                "HAZMAT_TEAM"
+            ])
+            print(f"💥 Explosives coordination requirements activated!")
         
         # Violence-specific coordination needs
         if violence_detected:
@@ -1217,22 +1271,29 @@ class EvidenceAgent:
         is_aiming = activity.lower() == "aiming"
         
         # Enhanced weapon detection: Weapon OR (Weapon + Aiming)
-        weapon_detected = max(gun_conf, knife_conf) > 0.4
+        weapon_detected = max(gun_conf, knife_conf, explosion_conf, grenade_conf) > 0.4
         
         # ENHANCEMENT: Save evidence if:
         # 1. Weapon detected (any confidence > 0.4)
         # 2. Violence detected (any confidence > 0.5)
-        # 3. OR Weapon detected + Aiming pose (even low confidence weapon)
+        # 3. Explosives detected (any confidence > 0.3) - IMMEDIATE PRIORITY
+        # 4. OR Weapon detected + Aiming pose (even low confidence weapon)
         weapon_plus_aiming = weapon_detected and is_aiming
         
-        if violence_detected and violence_confidence > 0.5:
+        # Check for explosives detection (IMMEDIATE EVIDENCE)
+        explosives_detected = explosion_conf > 0.3 or grenade_conf > 0.3
+        
+        if explosives_detected:
+            print(f"💥 Evidence: Explosives detected! Explosion: {explosion_conf:.2f}, Grenade: {grenade_conf:.2f}")
+            return True
+        elif violence_detected and violence_confidence > 0.5:
             print(f"🥊 Evidence: Violence detected! Confidence: {violence_confidence:.2f}")
             return True
         elif weapon_plus_aiming:
-            print(f"🎯 Enhanced Evidence: Weapon + Aiming detected! Weapon: {max(gun_conf, knife_conf):.2f}, Pose: {activity}")
+            print(f"🎯 Enhanced Evidence: Weapon + Aiming detected! Weapon: {max(gun_conf, knife_conf, explosion_conf, grenade_conf):.2f}, Pose: {activity}")
             return True
         elif weapon_detected:
-            print(f"🔫 Evidence: Weapon detected! Confidence: {max(gun_conf, knife_conf):.2f}")
+            print(f"🔫 Evidence: Weapon detected! Confidence: {max(gun_conf, knife_conf, explosion_conf, grenade_conf):.2f}")
             return True
         elif is_aiming:
             print(f"👁️ Evidence: Aiming pose detected! (No weapon)")
@@ -1242,11 +1303,15 @@ class EvidenceAgent:
     
     def _get_detection_type(self, detection: Dict[str, Any]) -> str:
         """Determine detection type for filename"""
+        explosion_conf = detection.get("explosion_conf", 0)
+        grenade_conf = detection.get("grenade_conf", 0)
         gun_conf = detection.get("gun_conf", 0)
         knife_conf = detection.get("knife_conf", 0)
         violence_detected = detection.get("violence_detected", False)
         
-        if violence_detected:
+        if explosion_conf > 0.3 or grenade_conf > 0.3:
+            return "explosion_detection"
+        elif violence_detected:
             return "violence_detection"
         elif gun_conf > 0.4:
             return "weapon_detection"
