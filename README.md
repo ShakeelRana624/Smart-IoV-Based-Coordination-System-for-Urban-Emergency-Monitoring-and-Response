@@ -269,51 +269,6 @@ firebase_config_manager.setup_service_account("my-key.json")
 - **🏛️ Government**: Public building security
 - **🎭 Events**: Crowd monitoring and safety
 
-## 🔧 Troubleshooting
-
-### Common Issues
-
-#### Fire-Smoke Model Not Loading
-```bash
-❌ Failed to load fire-smoke model: [Errno 2] No such file or directory
-```
-**Solution**: Ensure `fire-smoke.pt` is in the `models/` directory
-
-#### Firebase Initialization Failed
-```bash
-❌ Firebase initialization failed: Service account key not found
-```
-**Solution**: 
-1. Download service account key from Firebase Console
-2. Place `serviceAccountKey.json` in project root
-3. Run `python setup_firebase.py`
-
-#### Camera Not Working
-```bash
-❌ Failed to start camera
-```
-**Solution**: 
-1. Check camera connection
-2. Try different camera index (0, 1, 2...)
-3. Ensure camera is not used by other applications
-
-#### Low Performance
-```bash
-⚠️ Low FPS detected
-```
-**Solution**:
-1. Enable GPU acceleration with CUDA
-2. Reduce input resolution
-3. Close other applications
-4. Use optimized models
-
-### Debug Mode
-```bash
-# Enable debug logging
-export PYTHONPATH=$PYTHONPATH:.
-python main.py --debug
-```
-
 ## 📚 Documentation
 
 ### API Reference
@@ -370,9 +325,8 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - **Features**: Request features via GitHub discussions
 
 ### Contact
-- **Email**: [your-email@example.com]
-- **GitHub**: [your-github-username]
-- **Discord**: [your-discord-server]
+- **Email**: [shakeelrana6240@gmail.com]
+- **GitHub**: [ShakeelRana624]
 
 ---
 
